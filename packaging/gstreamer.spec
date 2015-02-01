@@ -1,8 +1,7 @@
 Name:       gstreamer
 Summary:    GStreamer streaming media framework runtime
-Version:    0.10.36
-Release:    24
-VCS:        framework/multimedia/gstreamer0.10#gstreamer-0.10.36-21-9-g235a2292177dcae968ddb40b499d7cfa7bb6f590
+Version:    0.10.37
+Release:    44
 Group:      Applications/Multimedia
 License:    LGPLv2+
 Source0:    %{name}-%{version}.tar.gz
@@ -11,7 +10,6 @@ Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 BuildRequires:  pkgconfig(glib-2.0)
 BuildRequires:  pkgconfig(libxml-2.0)
-BuildRequires:  pkgconfig(mm-ta)
 BuildRequires:  pkgconfig(dlog)
 BuildRequires:  bison
 BuildRequires:  flex
@@ -55,23 +53,20 @@ with different major/minor versions of GStreamer.
 
 
 %build
-%if 0%{?tizen_profile_mobile}
-cd mobile
-%else
-cd wearable
+
+
 ./autogen.sh --noconfigure
-%endif
 
 export CFLAGS+=" -Wall -g -fPIC\
  -DGST_EXT_AV_RECORDING\
  -DGST_EXT_QUEUE_ENHANCEMENT\
- -DGST_EXT_QUEUE_PULL_PATCH\
  -DGST_EXT_MQ_MODIFICATION\
  -DGST_EXT_CURRENT_BYTES\
  -DGST_EXT_BASEPARSER_MODIFICATION\
  -DGST_EXT_BASIC_MODIFICATION\
- -DGST_EXT_MODIFIED_DQBUF\
- -D_VSP_SPEED_"
+ -D_VSP_SPEED_\
+ -DGST_EXT_DATA_QUEUE_MODIFICATION\
+ -DGST_EXT_BASEPARSE_ENABLE_WFD"
 
 %configure --prefix=/usr\
  --disable-valgrind\
@@ -97,11 +92,6 @@ make -v
 make %{?jobs:-j%jobs}
 
 %install
-%if 0%{?tizen_profile_mobile}
-cd mobile
-%else
-cd wearable
-%endif
 rm -rf %{buildroot}
 mkdir -p %{buildroot}/usr/share/license
 cp COPYING %{buildroot}/usr/share/license/%{name}
@@ -129,17 +119,9 @@ rm -rf %{buildroot}/tmp/dump
 
 
 %files
-%if 0%{?tizen_profile_mobile}
-%manifest mobile/gstreamer.manifest
-%else
-%manifest wearable/gstreamer.manifest
-%endif
+%manifest gstreamer.manifest
 %defattr(-,root,root,-)
-%if 0%{?tizen_profile_mobile}
-%doc mobile/AUTHORS mobile/COPYING mobile/NEWS mobile/README mobile/RELEASE mobile/TODO
-%else
-%doc wearable/AUTHORS wearable/COPYING wearable/NEWS wearable/README wearable/RELEASE wearable/TODO
-%endif
+%doc AUTHORS COPYING NEWS README RELEASE TODO
 %{_libdir}/libgstreamer-0.10.so.*
 %{_libdir}/libgstbase-0.10.so.*
 %{_libdir}/libgstcontroller-0.10.so.*
@@ -190,11 +172,7 @@ rm -rf %{buildroot}/tmp/dump
 %{_libdir}/pkgconfig/gstreamer-net-0.10.pc
 
 %files tools
-%if 0%{?tizen_profile_mobile}
-%manifest mobile/gstreamer-tools.manifest
-%else
-%manifest wearable/gstreamer-tools.manifest
-%endif
+%manifest gstreamer-tools.manifest
 %defattr(-,root,root,-)
 %{_bindir}/gst-feedback
 %{_bindir}/gst-inspect

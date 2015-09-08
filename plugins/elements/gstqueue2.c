@@ -66,7 +66,9 @@
 #include "gst/glib-compat-private.h"
 
 #include <string.h>
-
+#ifdef GST_EXT_QUEUE_ENHANCEMENT
+#include <fcntl.h>
+#endif
 #ifdef G_OS_WIN32
 #include <io.h>                 /* lseek, open, close, read */
 #undef lseek
@@ -127,7 +129,14 @@ enum
 #endif
 #define DEFAULT_RING_BUFFER_MAX_SIZE 0
 #ifdef GST_EXT_QUEUE_ENHANCEMENT
-#define DEFAULT_FILE_BUFFER_MAX_SIZE 0 
+#define DEFAULT_FILE_BUFFER_MAX_SIZE 0
+
+#define MAX_NUM_OF_BUFFER_PAD 4
+#define DEFAULT_BUFFER_PAD_SIZE (256*1024)
+#define DEFAULT_CURRENT_LEVEL_PAD_SIZE (50*1024)
+
+guint64 buffer_pad_size[MAX_NUM_OF_BUFFER_PAD] =
+  {(1.5*1024*1024), (1*1024*1024), (512*1024), (256*1024)};
 #endif
 
 enum
@@ -278,6 +287,11 @@ static gboolean gst_queue2_is_empty (GstQueue2 * queue);
 static gboolean gst_queue2_is_filled (GstQueue2 * queue);
 
 static void update_cur_level (GstQueue2 * queue, GstQueue2Range * range);
+
+#ifdef GST_EXT_QUEUE_ENHANCEMENT
+static void gst_queue2_update_buffer_pad_size(GstQueue2 * queue);
+static gboolean change_current_range(GstQueue2 * queue, GstQueue2Range *req_range, guint64 offset, guint length);
+#endif
 
 typedef enum
 {
@@ -526,6 +540,8 @@ gst_queue2_init (GstQueue2 * queue, GstQueue2Class * g_class)
   queue->ring_buffer_max_size = DEFAULT_RING_BUFFER_MAX_SIZE;
 #ifdef GST_EXT_QUEUE_ENHANCEMENT
   queue->file_buffer_max_size = DEFAULT_FILE_BUFFER_MAX_SIZE;
+  queue->buffer_pad_size = DEFAULT_BUFFER_PAD_SIZE;
+  queue->latest_seek_pos = 0;
 #endif
 
   GST_DEBUG_OBJECT (queue,
@@ -571,7 +587,7 @@ debug_ranges (GstQueue2 * queue)
         "range [%" G_GUINT64_FORMAT "-%" G_GUINT64_FORMAT "] (rb [%"
         G_GUINT64_FORMAT "-%" G_GUINT64_FORMAT "])(fb [%"
         G_GUINT64_FORMAT "-%" G_GUINT64_FORMAT "]), reading %" G_GUINT64_FORMAT
-        " current range? %s", walk->offset, walk->writing_pos, walk->rb_offset, walk->rb_writing_pos, 
+        " current range? %s", walk->offset, walk->writing_pos, walk->rb_offset, walk->rb_writing_pos,
         walk->fb_offset, walk->fb_writing_pos, walk->reading_pos,
         walk == queue->current ? "**y**" : "  n  ");
 #else
@@ -961,6 +977,11 @@ update_buffering (GstQueue2 * queue)
     } else {
       percent = GET_PERCENT (bytes, 0);
     }
+
+    GST_DEBUG_OBJECT (queue, "bytes filled %d percent", (gint) percent);
+    GST_DEBUG_OBJECT (queue, "time filled %d percent", GET_PERCENT (time, 0));
+    GST_DEBUG_OBJECT (queue, "buffers filled %d percent", GET_PERCENT (buffers, 0));
+    GST_DEBUG_OBJECT (queue, "filled %d percent", GET_PERCENT (rate_time, 0));
 #else
     if (!QUEUE_IS_USING_RING_BUFFER (queue)) {
       percent = GET_PERCENT (bytes, 0);
@@ -1110,8 +1131,10 @@ update_in_rates (GstQueue2 * queue)
     queue->cur_level.rate_time =
         queue->cur_level.bytes / queue->byte_in_rate * GST_SECOND;
   }
+
   GST_DEBUG_OBJECT (queue, "rates: in %f, time %" GST_TIME_FORMAT,
       queue->byte_in_rate, GST_TIME_ARGS (queue->cur_level.rate_time));
+  GST_INFO_OBJECT (queue, "byte_in_rate : %.2f KBps", (queue->byte_in_rate/1024));
 }
 
 static void
@@ -1176,11 +1199,20 @@ static gboolean
 perform_seek_to_offset (GstQueue2 * queue, guint64 offset)
 {
   GstEvent *event;
-  gboolean res;
+  gboolean res = TRUE;
 
   GST_QUEUE2_MUTEX_UNLOCK (queue);
 
-  GST_DEBUG_OBJECT (queue, "Seeking to %" G_GUINT64_FORMAT, offset);
+#ifdef GST_EXT_QUEUE_ENHANCEMENT
+  if (queue->latest_seek_pos == offset) {
+    GST_DEBUG_OBJECT (queue, "Duplicated request to %" G_GUINT64_FORMAT", in: %f", offset, queue->byte_in_rate);
+    GST_QUEUE2_MUTEX_LOCK (queue);
+    return res;
+  } else {
+    GST_INFO_OBJECT (queue, "Seeking to %" G_GUINT64_FORMAT", in: %f", offset, queue->byte_in_rate);
+  }
+  queue->latest_seek_pos = offset;
+#endif
 
   event =
       gst_event_new_seek (1.0, GST_FORMAT_BYTES,
@@ -1204,6 +1236,66 @@ perform_seek_to_offset (GstQueue2 * queue, guint64 offset)
   return res;
 }
 
+#ifdef GST_EXT_QUEUE_ENHANCEMENT
+static void
+gst_queue2_update_buffer_pad_size(GstQueue2 * queue)
+{
+  guint idx = 0;
+
+  for (idx=0 ; idx < MAX_NUM_OF_BUFFER_PAD ; idx++) {
+    if ((guint64)queue->byte_in_rate > buffer_pad_size[idx])
+      break;
+  }
+
+  if (idx < MAX_NUM_OF_BUFFER_PAD)
+    queue->buffer_pad_size = buffer_pad_size[idx];
+  else
+    queue->buffer_pad_size = DEFAULT_BUFFER_PAD_SIZE;
+
+  GST_DEBUG_OBJECT(queue, "new pad size = %lld", queue->buffer_pad_size);
+}
+
+/* To reduce http server connection we do not change current range repeatedly. */
+static gboolean
+change_current_range(GstQueue2 * queue, GstQueue2Range *req_range, guint64 offset, guint length)
+{
+  guint64 curr_level = 0;
+  guint64 curr_min_level = 0;
+
+  if (queue->current->writing_pos > queue->current->reading_pos)
+    curr_level = queue->current->writing_pos - queue->current->reading_pos;
+
+  gst_queue2_update_buffer_pad_size (queue);
+  curr_min_level = MIN((queue->max_level.bytes*0.05), DEFAULT_CURRENT_LEVEL_PAD_SIZE);
+
+  GST_DEBUG_OBJECT(queue, " curr[w%"G_GUINT64_FORMAT", r%"G_GUINT64_FORMAT
+                          ", d%"G_GUINT64_FORMAT", m%"G_GUINT64_FORMAT
+                          "] u[%"G_GUINT64_FORMAT"]  [%s]",
+                          queue->current->writing_pos, queue->current->reading_pos,
+                          curr_level, curr_min_level,
+                          queue->upstream_size, (queue->is_eos)?"EOS":"---");
+
+  if ((queue->is_eos) ||
+      (queue->current->writing_pos >= queue->upstream_size))
+    return TRUE;
+
+  if ((queue->current->writing_pos < req_range->writing_pos)
+    && (offset+length < (queue->current->writing_pos + queue->buffer_pad_size)))
+    return FALSE;
+
+  if (curr_level >= curr_min_level)
+  {
+    GST_DEBUG_OBJECT (queue, "Range Switching");
+    return TRUE;
+  }
+  else
+  {
+    GST_DEBUG_OBJECT (queue, "No Switching.. keep receiving data in the same range..");
+    return FALSE;
+  }
+}
+#endif
+
 /* see if there is enough data in the file to read a full buffer */
 static gboolean
 gst_queue2_have_data (GstQueue2 * queue, guint64 offset, guint length)
@@ -1216,11 +1308,28 @@ gst_queue2_have_data (GstQueue2 * queue, guint64 offset, guint length)
   if ((range = find_range (queue, offset))) {
     if (queue->current != range) {
       GST_DEBUG_OBJECT (queue, "switching ranges, do seek to range position");
+
+#ifdef GST_EXT_QUEUE_ENHANCEMENT
+      if ((QUEUE_IS_USING_RING_BUFFER (queue)) ||
+          (QUEUE_IS_USING_FILE_RING_BUFFER (queue)) ||
+          (change_current_range(queue, range, offset, length)))
+      {
+        perform_seek_to_offset (queue, range->writing_pos);
+      }
+
+      if (offset + length <= range->writing_pos)
+        return TRUE;
+      else
+        return FALSE;
+
+#else
       perform_seek_to_offset (queue, range->writing_pos);
+#endif
+
 #ifdef GST_EXT_QUEUE_ENHANCEMENT
       return FALSE;
 #endif
-    }
+  	}
 
     GST_INFO_OBJECT (queue, "cur_level.bytes %u (max %" G_GUINT64_FORMAT ")",
         queue->cur_level.bytes, QUEUE_MAX_BYTES (queue));
@@ -1272,9 +1381,16 @@ gst_queue2_have_data (GstQueue2 * queue, guint64 offset, guint length)
               "requested data is within range, wait for data");
           return FALSE;
         }
-      } else if (offset > queue->current->writing_pos && offset < queue->current->writing_pos  + 200000) {
-        GST_INFO_OBJECT (queue, "wait for data");
-        return FALSE;
+      } else {
+
+        gst_queue2_update_buffer_pad_size (queue);
+
+        if (offset > queue->current->writing_pos && offset < queue->current->writing_pos + queue->buffer_pad_size) {
+          GST_INFO_OBJECT (queue, "wait for data");
+          update_cur_pos (queue, queue->current, offset + length);
+          update_in_rates (queue);
+          return FALSE;
+        }
       }
 #else
       } else if (offset < queue->current->writing_pos + 200000) {
@@ -1307,6 +1423,10 @@ gst_queue2_read_data_at_offset (GstQueue2 * queue, guint64 offset, guint length,
   guint8 *ring_buffer;
   size_t res;
 
+#ifdef GST_EXT_QUEUE_ENHANCEMENT
+  int ret = 0;
+#endif
+
   ring_buffer = queue->ring_buffer;
 
   if (QUEUE_IS_USING_TEMP_FILE (queue) && FSEEK_FILE (queue->temp_file, offset))
@@ -1317,6 +1437,13 @@ gst_queue2_read_data_at_offset (GstQueue2 * queue, guint64 offset, guint length,
       length, offset);
   if (QUEUE_IS_USING_TEMP_FILE (queue)) {
     res = fread (dst, 1, length, queue->temp_file);
+	/* [queue2]add posix_fadvise because of page cache free after streaming */
+    #ifdef GST_EXT_QUEUE_ENHANCEMENT
+	ret = posix_fadvise(fileno((FILE *)queue->temp_file), 0, 0, POSIX_FADV_DONTNEED);
+	if (ret != 0){
+		GST_WARNING_OBJECT(queue,"posix_fadvise failed : ret %x",ret);
+		}
+    #endif
   } else {
     memcpy (dst, ring_buffer + offset, length);
     res = length;
@@ -1366,6 +1493,7 @@ gst_queue2_create_read (GstQueue2 * queue, guint64 offset, guint length,
   guint64 rpos;
 #ifdef GST_EXT_QUEUE_ENHANCEMENT
   guint64 fb_size;
+  GstQueue2Range* read_range = NULL;
 #endif
 
   /* allocate the output buffer of the requested size */
@@ -1383,6 +1511,12 @@ gst_queue2_create_read (GstQueue2 * queue, guint64 offset, guint length,
 
   remaining = length;
   while (remaining > 0) {
+
+#ifdef GST_EXT_QUEUE_ENHANCEMENT
+	if(!(read_range = find_range (queue, offset)))
+		read_range = queue->current;
+#endif
+
     /* configure how much/whether to read */
     if (!gst_queue2_have_data (queue, rpos, remaining)) {
       read_length = 0;
@@ -1446,7 +1580,14 @@ gst_queue2_create_read (GstQueue2 * queue, guint64 offset, guint length,
           queue->current->max_reading_pos = rpos;
           update_cur_level (queue, queue->current);
         }
+
+        /* update the buffering */
+        if (queue->use_buffering)
+        {
+          update_buffering (queue);
+        }
 #endif
+
         GST_DEBUG_OBJECT (queue, "waiting for add");
         GST_QUEUE2_WAIT_ADD_CHECK (queue, queue->srcresult, out_flushing);
         continue;
@@ -1457,7 +1598,15 @@ gst_queue2_create_read (GstQueue2 * queue, guint64 offset, guint length,
     }
 
     /* set range reading_pos to actual reading position for this read */
+#ifdef GST_EXT_QUEUE_ENHANCEMENT
+    if((!QUEUE_IS_USING_RING_BUFFER (queue)) &&
+       (!QUEUE_IS_USING_FILE_RING_BUFFER(queue)))
+      read_range->reading_pos = rpos;
+    else
+      read_range->reading_pos = rpos;
+#else
     queue->current->reading_pos = rpos;
+#endif
 
     /* configure how much and from where to read */
     if (QUEUE_IS_USING_RING_BUFFER (queue)) {
@@ -1472,8 +1621,8 @@ gst_queue2_create_read (GstQueue2 * queue, guint64 offset, guint length,
 #ifdef GST_EXT_QUEUE_ENHANCEMENT
     } else if (QUEUE_IS_USING_FILE_RING_BUFFER(queue)){
       file_offset =
-          (queue->current->fb_offset + (rpos -
-              queue->current->offset)) % fb_size;
+          (read_range->fb_offset + (rpos -
+              read_range->offset)) % fb_size;
 
       if (file_offset + read_length > fb_size) {
         block_length = fb_size - file_offset;
@@ -1507,8 +1656,22 @@ gst_queue2_create_read (GstQueue2 * queue, guint64 offset, guint length,
       block_length = read_length;
       remaining -= read_return;
 
+#ifdef GST_EXT_QUEUE_ENHANCEMENT
+      if((!QUEUE_IS_USING_RING_BUFFER (queue)) &&
+         (!QUEUE_IS_USING_FILE_RING_BUFFER(queue)))
+      {
+        rpos = (read_range->reading_pos += read_return);
+        update_cur_pos (queue, read_range, read_range->reading_pos);
+      }
+      else
+      {
+        rpos = (read_range->reading_pos += read_return);
+        update_cur_pos (queue, read_range, read_range->reading_pos);
+      }
+#else
       rpos = (queue->current->reading_pos += read_return);
       update_cur_pos (queue, queue->current, queue->current->reading_pos);
+#endif
     }
     GST_QUEUE2_SIGNAL_DEL (queue);
     GST_DEBUG_OBJECT (queue, "%u bytes left to read", remaining);
@@ -1519,6 +1682,12 @@ gst_queue2_create_read (GstQueue2 * queue, guint64 offset, guint length,
   GST_BUFFER_OFFSET_END (buf) = offset + length;
 
   *buffer = buf;
+
+#ifdef GST_EXT_QUEUE_ENHANCEMENT
+  /* update the buffering */
+  if (queue->use_buffering)
+    update_buffering (queue);
+#endif
 
   return GST_FLOW_OK;
 
@@ -1772,7 +1941,10 @@ gst_queue2_create_write (GstQueue2 * queue, GstBuffer * buffer)
   guint64 writing_pos, new_writing_pos;
   GstQueue2Range *range, *prev, *next;
 #ifdef GST_EXT_QUEUE_ENHANCEMENT
-  guint fb_size;
+  guint64 merged_writing_pos = 0;
+  guint64 merged_max_read_pos = 0;
+
+  guint64 fb_size;
 #endif
 
   if (QUEUE_IS_USING_RING_BUFFER (queue))
@@ -1914,7 +2086,7 @@ gst_queue2_create_write (GstQueue2 * queue, GstBuffer * buffer)
 #ifdef GST_EXT_QUEUE_ENHANCEMENT
     else if (QUEUE_IS_USING_FILE_RING_BUFFER(queue)) {
       gint64 space;
-	
+
       /* calculate the space in the ring buffer not used by data from
        * the current range */
       while (queue->file_buffer_max_size <= queue->cur_level.bytes + 1024*200) {
@@ -2027,7 +2199,7 @@ gst_queue2_create_write (GstQueue2 * queue, GstBuffer * buffer)
       }
     }
 #endif
-   else { 
+   else {
       to_write = size;
       new_writing_pos = writing_pos + to_write;
     }
@@ -2079,6 +2251,10 @@ gst_queue2_create_write (GstQueue2 * queue, GstBuffer * buffer)
            * is a lot of data in the range we merged with to avoid reading it all
            * again. */
           queue->current->next = next->next;
+#ifdef GST_EXT_QUEUE_ENHANCEMENT
+          merged_writing_pos = next->writing_pos;
+          merged_max_read_pos = next->max_reading_pos;
+#endif
           g_slice_free (GstQueue2Range, next);
 
           debug_ranges (queue);
@@ -2144,6 +2320,21 @@ gst_queue2_create_write (GstQueue2 * queue, GstBuffer * buffer)
 #endif
     } else {
       queue->current->writing_pos = writing_pos = new_writing_pos;
+
+#ifdef GST_EXT_QUEUE_ENHANCEMENT
+      if (merged_writing_pos != 0) {
+        if (queue->current->writing_pos + (50*1024) < merged_writing_pos) {
+          queue->current->writing_pos = merged_writing_pos;
+          queue->current->max_reading_pos = merged_max_read_pos;
+          GST_INFO_OBJECT (queue, "merged writing position : %lld, read: %lld", merged_writing_pos, merged_max_read_pos);
+          perform_seek_to_offset(queue, queue->current->writing_pos);
+        } else {
+          GST_INFO_OBJECT (queue, "keep waiting.");
+          if (queue->current->writing_pos < merged_max_read_pos)
+            queue->current->max_reading_pos = queue->current->writing_pos;
+        }
+      }
+#endif
     }
     update_cur_level (queue, queue->current);
 
@@ -2155,7 +2346,7 @@ gst_queue2_create_write (GstQueue2 * queue, GstBuffer * buffer)
         queue->cur_level.bytes, QUEUE_MAX_BYTES (queue));
 
     GST_QUEUE2_SIGNAL_ADD (queue);
-  };
+  }
 
   return TRUE;
 
@@ -2988,6 +3179,126 @@ gst_queue2_peer_query (GstQueue2 * queue, GstPad * pad, GstQuery * query)
   return ret;
 }
 
+#ifdef GST_EXT_QUEUE_ENHANCEMENT
+static gboolean
+gst_queue2_handle_buffering_query(GstQueue2 *queue, GstQuery * query)
+{
+  GstFormat format;
+  gint64 start, stop, range_start, range_stop;
+  gint percent;
+  gint64 estimated_total, buffering_left;
+  GstFormat peer_fmt;
+  gint64 duration;
+  gboolean peer_res, is_buffering, is_eos;
+  gdouble byte_in_rate, byte_out_rate;
+  gint64 peer_pos;
+
+  byte_in_rate = queue->byte_in_rate;
+  byte_out_rate = queue->byte_out_rate;
+  is_buffering = queue->is_buffering;
+  is_eos = queue->is_eos;
+  percent = queue->buffering_percent;
+
+  GST_DEBUG_OBJECT (queue, "byte_in_rate %f", byte_in_rate);
+  GST_DEBUG_OBJECT (queue, "byte_out_rate %f", byte_out_rate);
+  GST_DEBUG_OBJECT (queue, "percent %d", percent);
+  GST_DEBUG_OBJECT (queue, "eos? %s, buffering? %s", (is_eos)?"OO":"XX", (is_buffering)?"OO":"XX");
+
+  /* get duration of upstream in bytes */
+  peer_fmt = GST_FORMAT_BYTES;
+  peer_res = gst_pad_query_peer_duration (queue->sinkpad, &peer_fmt, &duration);
+  if (peer_res)
+    peer_res = gst_pad_query_peer_position(queue->sinkpad, &peer_fmt, &peer_pos);
+
+  GST_DEBUG_OBJECT (queue, "duration %lld, peer_pos %lld", duration, peer_pos);
+
+  /* calculate remaining and total download time */
+  if (peer_res && byte_in_rate > 0.0) {
+    estimated_total = (duration * 1000) / byte_in_rate;
+    buffering_left = ((duration - peer_pos) * 1000) / byte_in_rate;
+  } else {
+    estimated_total = -1;
+    buffering_left = -1;
+  }
+
+  GST_DEBUG_OBJECT (queue, "estimated %" G_GINT64_FORMAT ", left %"
+  G_GINT64_FORMAT, estimated_total, buffering_left);
+
+  gst_query_parse_buffering_range (query, &format, NULL, NULL, NULL);
+
+  switch (format) {
+    case GST_FORMAT_PERCENT:
+      /* we need duration */
+      if (!peer_res)
+        return FALSE;
+
+      /* get our available data relative to the duration */
+      if (duration != -1 && duration != 0)
+      {
+        GST_DEBUG_OBJECT (queue, "cur_level byte %d", queue->cur_level.bytes);
+        GST_DEBUG_OBJECT (queue, "cur_level buffers %d", queue->cur_level.buffers);
+        GST_DEBUG_OBJECT (queue, "cur_level time %lld", queue->cur_level.time);
+
+        start = GST_FORMAT_PERCENT_MAX * (peer_pos - queue->cur_level.bytes) / duration;
+        stop = GST_FORMAT_PERCENT_MAX * peer_pos / duration;
+      }
+      else
+      {
+        start = 0;
+        stop = -1;
+      }
+
+      GST_DEBUG_OBJECT (queue, "start %lld, stop %lld", start, stop);
+      break;
+    case GST_FORMAT_BYTES:
+      start = 0;
+      stop = peer_pos;
+      break;
+
+    default:
+      start = -1;
+      stop = -1;
+      break;
+  }
+
+  /* fill out the buffered ranges */
+  switch (format) {
+    case GST_FORMAT_PERCENT:
+      if (duration == -1 || duration ==0) {
+        range_start = 0;
+        range_stop = 0;
+        break;
+      }
+
+      range_start = 100 * (peer_pos - queue->cur_level.bytes) / duration;
+      range_stop = 100 * peer_pos / duration;
+      break;
+    case GST_FORMAT_BYTES:
+      range_start = (peer_pos - queue->cur_level.bytes);
+      range_stop = peer_pos;
+      break;
+    default:
+      range_start = -1;
+      range_stop = -1;
+      break;
+  }
+
+  GST_DEBUG_OBJECT (queue,
+                    "range starting at %" G_GINT64_FORMAT " and finishing at %"
+                    G_GINT64_FORMAT, range_start, range_stop);
+
+  gst_query_add_buffering_range (query, range_start, range_stop);
+
+  gst_query_set_buffering_percent (query, is_buffering, percent);
+  gst_query_set_buffering_range (query, format, start, stop,
+                                                estimated_total);
+  gst_query_set_buffering_stats (query, GST_BUFFERING_DOWNLOAD,
+                    byte_in_rate, byte_out_rate, buffering_left);
+
+  return TRUE;
+}
+#endif
+
 static gboolean
 gst_queue2_handle_src_query (GstPad * pad, GstQuery * query)
 {
@@ -3044,10 +3355,15 @@ gst_queue2_handle_src_query (GstPad * pad, GstQuery * query)
 
       /* FIXME - is this condition correct? what should ring buffer do? */
       if (QUEUE_IS_USING_QUEUE (queue)) {
+#ifdef GST_EXT_QUEUE_ENHANCEMENT
+        if (!gst_queue2_handle_buffering_query(queue, query))
+          goto peer_failed;
+#else
         /* no temp file, just forward to the peer */
         if (!gst_queue2_peer_query (queue, queue->sinkpad, query))
           goto peer_failed;
         GST_DEBUG_OBJECT (queue, "buffering forwarded to peer");
+#endif
       } else {
         gint64 start, stop, range_start, range_stop;
         guint64 writing_pos;
@@ -3085,6 +3401,10 @@ gst_queue2_handle_src_query (GstPad * pad, GstQuery * query)
         if (peer_res && byte_in_rate > 0.0) {
           estimated_total = (duration * 1000) / byte_in_rate;
           buffering_left = ((duration - writing_pos) * 1000) / byte_in_rate;
+#ifdef GST_EXT_QUEUE_ENHANCEMENT
+          if (is_eos)
+            buffering_left = 0;
+#endif
         } else {
           estimated_total = -1;
           buffering_left = -1;
@@ -3135,7 +3455,12 @@ gst_queue2_handle_src_query (GstPad * pad, GstQuery * query)
               range_stop = 100 * queued_ranges->writing_pos / duration;
               break;
             case GST_FORMAT_BYTES:
-              range_start = queued_ranges->offset;
+#ifdef GST_EXT_QUEUE_ENHANCEMENT
+              if (queued_ranges->reading_pos > 0)
+                range_start = queued_ranges->reading_pos;
+              else
+#endif
+                range_start = queued_ranges->offset;
               range_stop = queued_ranges->writing_pos;
               break;
             default:

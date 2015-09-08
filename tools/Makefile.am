@@ -38,24 +38,24 @@ bin_SCRIPTS = gst-feedback-@GST_MAJORMINOR@
 # make sure each versioned tool has the right source file and flags
 if !GST_DISABLE_LOADSAVE
 gst_xmllaunch_@GST_MAJORMINOR@_SOURCES = gst-launch.c tools.h
-gst_xmllaunch_@GST_MAJORMINOR@_CFLAGS = $(GST_OBJ_CFLAGS) -UGST_DISABLE_DEPRECATED
+gst_xmllaunch_@GST_MAJORMINOR@_CFLAGS = $(GST_OBJ_CFLAGS) -UGST_DISABLE_DEPRECATED -pie
 gst_xmllaunch_@GST_MAJORMINOR@_LDADD = $(GST_OBJ_LIBS)
 endif
 
 if !GST_DISABLE_PARSE
 gst_launch_@GST_MAJORMINOR@_SOURCES = gst-launch.c tools.h
-gst_launch_@GST_MAJORMINOR@_CFLAGS = $(GST_OBJ_CFLAGS) -UGST_DISABLE_DEPRECATED
+gst_launch_@GST_MAJORMINOR@_CFLAGS = $(GST_OBJ_CFLAGS) -UGST_DISABLE_DEPRECATED -pie
 gst_launch_@GST_MAJORMINOR@_LDADD = $(GST_OBJ_LIBS)
 endif
 
 gst_inspect_@GST_MAJORMINOR@_SOURCES = gst-inspect.c tools.h
-gst_inspect_@GST_MAJORMINOR@_CFLAGS = $(GST_OBJ_CFLAGS)
+gst_inspect_@GST_MAJORMINOR@_CFLAGS = $(GST_OBJ_CFLAGS) -pie
 gst_inspect_@GST_MAJORMINOR@_LDADD = $(GST_OBJ_LIBS)
 gst_typefind_@GST_MAJORMINOR@_SOURCES = gst-typefind.c tools.h
-gst_typefind_@GST_MAJORMINOR@_CFLAGS = $(GST_OBJ_CFLAGS)
+gst_typefind_@GST_MAJORMINOR@_CFLAGS = $(GST_OBJ_CFLAGS) -pie
 gst_typefind_@GST_MAJORMINOR@_LDADD = $(GST_OBJ_LIBS)
 gst_xmlinspect_@GST_MAJORMINOR@_SOURCES = gst-xmlinspect.c tools.h
-gst_xmlinspect_@GST_MAJORMINOR@_CFLAGS = $(GST_OBJ_CFLAGS)
+gst_xmlinspect_@GST_MAJORMINOR@_CFLAGS = $(GST_OBJ_CFLAGS) -pie
 gst_xmlinspect_@GST_MAJORMINOR@_LDADD = $(GST_OBJ_LIBS)
 
 gst-feedback-@GST_MAJORMINOR@: gst-feedback-m.m

@@ -67,8 +67,6 @@
 #include "glib-compat-private.h"
 
 #include <gst/gst.h>
-#include <mm_ta/mm_ta.h>
-
 
 #define GST_CAT_DEFAULT GST_CAT_PLUGIN_LOADING
 
@@ -735,8 +733,6 @@ gst_plugin_load_file (const gchar * filename, GError ** error)
     }
   }
 
-__ta__(__tafmt__("load plugin %s", filename),
-
   GST_CAT_DEBUG (GST_CAT_PLUGIN_LOADING, "attempt to load plugin \"%s\"",
       filename);
 
@@ -866,8 +862,6 @@ __ta__(__tafmt__("load plugin %s", filename),
     gst_object_ref (plugin);
     gst_default_registry_add_plugin (plugin);
   }
-
-) //__ta__
 
   g_static_mutex_unlock (&gst_plugin_loading_mutex);
   return plugin;

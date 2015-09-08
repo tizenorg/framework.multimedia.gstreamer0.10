@@ -74,7 +74,22 @@ struct _GstSystemClockPrivate
   LARGE_INTEGER start;
   LARGE_INTEGER frequency;
 #endif                          /* G_OS_WIN32 */
+
+  wait_jitter_adjust_func wait_jitter_adjust;
+  gpointer adjust_user_data;
+  wait_jitter_adjust_func wait_jitter_revert;
+  gpointer revert_user_data;
 };
+
+/* consider after adjust , no need to wait again */
+#define GST_SYSTEM_CLOCK_WAIT_ADJUST(clock) \
+    if(clock->priv->wait_jitter_adjust) { \
+	clock->priv->wait_jitter_adjust(clock, clock->priv->adjust_user_data); \
+	wait_twice = FALSE; }
+
+#define GST_SYSTEM_CLOCK_WAIT_REVERT(clock) \
+    if(clock->priv->wait_jitter_revert) \
+	clock->priv->wait_jitter_revert(clock, clock->priv->revert_user_data);
 
 #define GST_SYSTEM_CLOCK_GET_PRIVATE(obj)  \
    (G_TYPE_INSTANCE_GET_PRIVATE ((obj), GST_TYPE_SYSTEM_CLOCK, \
@@ -172,6 +187,9 @@ gst_system_clock_init (GstSystemClock * clock)
 
   clock->priv->clock_type = DEFAULT_CLOCK_TYPE;
   clock->priv->timer = gst_poll_new_timer ();
+
+  gst_system_clock_wait_adjust(clock, NULL, NULL);
+  gst_system_clock_wait_revert(clock, NULL, NULL);
 
 #ifdef G_OS_WIN32
   QueryPerformanceFrequency (&clock->priv->frequency);
@@ -581,13 +599,17 @@ gst_system_clock_id_wait_jitter_unlocked (GstClock * clock,
   GstClockTime entryt, now;
   GstClockTimeDiff diff;
   GstClockReturn status;
+  gboolean wait_twice = TRUE;
 
   if (G_UNLIKELY (GET_ENTRY_STATUS (entry) == GST_CLOCK_UNSCHEDULED))
     return GST_CLOCK_UNSCHEDULED;
 
   /* need to call the overridden method because we want to sync against the time
    * of the clock, whatever the subclass uses as a clock. */
+
+  GST_SYSTEM_CLOCK_WAIT_ADJUST(sysclock);
   now = gst_clock_get_time (clock);
+  GST_SYSTEM_CLOCK_WAIT_REVERT(sysclock);
 
   /* get the time of the entry */
   entryt = GST_CLOCK_ENTRY_TIME (entry);
@@ -677,8 +699,11 @@ gst_system_clock_id_wait_jitter_unlocked (GstClock * clock,
 
         /* reschedule if gst_poll_wait returned early or we have to reschedule after
          * an unlock*/
-        now = gst_clock_get_time (clock);
-        diff = GST_CLOCK_DIFF (now, entryt);
+        if(wait_twice) {
+          now = gst_clock_get_time (clock);
+          diff = GST_CLOCK_DIFF (now, entryt);
+	} else
+	  diff = 0;
 
         if (diff <= 0) {
           /* timeout, this is fine, we can report success now */
@@ -878,4 +903,28 @@ gst_system_clock_id_unschedule (GstClock * clock, GstClockEntry * entry)
     }
   }
   GST_OBJECT_UNLOCK (clock);
+}
+
+void
+gst_system_clock_wait_adjust(GstClock *clock,
+	wait_jitter_adjust_func wait_jitter_adjust, gpointer user_data)
+{
+	GstSystemClock *sysclock = GST_SYSTEM_CLOCK_CAST(clock);
+
+	GST_OBJECT_LOCK(sysclock);
+	sysclock->priv->wait_jitter_adjust = wait_jitter_adjust;
+	sysclock->priv->adjust_user_data = user_data;
+	GST_OBJECT_UNLOCK(sysclock);
+}
+
+void
+gst_system_clock_wait_revert(GstClock *clock,
+	wait_jitter_adjust_func wait_jitter_revert, gpointer user_data)
+{
+	GstSystemClock *sysclock = GST_SYSTEM_CLOCK_CAST(clock);
+
+	GST_OBJECT_LOCK(sysclock);
+	sysclock->priv->wait_jitter_revert = wait_jitter_revert;
+	sysclock->priv->revert_user_data = user_data;
+	GST_OBJECT_UNLOCK(sysclock);
 }

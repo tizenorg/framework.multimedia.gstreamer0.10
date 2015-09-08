@@ -118,8 +118,6 @@
 #include <locale.h>             /* for LC_ALL */
 
 #include "gst.h"
-#include <mm_ta/mm_ta.h>
-
 
 #define GST_CAT_DEFAULT GST_CAT_GST_INIT
 
@@ -498,9 +496,6 @@ gst_init (int *argc, char **argv[])
 {
   GError *err = NULL;
 
-  MMTA_INIT();
-
-__ta__("gst_init",
   if (!gst_init_check (argc, argv, &err)) {
     g_print ("Could not initialize GStreamer: %s\n",
         err ? err->message : "unknown error occurred");
@@ -509,8 +504,6 @@ __ta__("gst_init",
     }
     exit (1);
   }
-)
-
 }
 
 /**
@@ -1134,8 +1127,6 @@ gst_deinit (void)
 
   gst_deinitialized = TRUE;
   GST_INFO ("deinitialized GStreamer");
-
-  MMTA_RELEASE();
 
 }
 

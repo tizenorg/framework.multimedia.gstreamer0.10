@@ -34,6 +34,9 @@ G_BEGIN_DECLS
 #define GST_IS_BASE_PARSE_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_BASE_PARSE))
 #define GST_BASE_PARSE_CAST(obj)       ((GstBaseParse *)(obj))
 
+#define GST_BASEPARSE_ALP_EXYNOS_MP3
+//#define GST_BASEPARSE_ALP_EXYNOS_LOG
+
 /**
  * GST_BASE_PARSE_SRC_PAD:
  * @obj: base parse instance
@@ -323,6 +326,32 @@ gboolean        gst_base_parse_add_index_entry (GstBaseParse * parse,
                                                 GstClockTime   ts,
                                                 gboolean       key,
                                                 gboolean       force);
+
+#ifdef GST_EXT_BASEPARSER_MODIFICATION /* get baseparse private param */
+void            gst_base_parse_get_upstream_size (GstBaseParse * parse,
+                                                gint64 * upstream_size);
+
+void            gst_base_parse_get_index_last_offset (GstBaseParse * parse,
+                                                gint64 * index_last_offset);
+
+void            gst_base_parse_get_index_last_ts (GstBaseParse * parse,
+                                                GstClockTime * index_last_ts);
+
+void            gst_base_parse_get_pad_mode (GstBaseParse * parse,
+                                                GstActivateMode * pad_mode);
+void           gst_base_parse_set_seek_mode (GstBaseParse * parse, 
+                                                gboolean seek_mode);
+#endif
+
+
+#ifdef GST_BASEPARSE_ALP_EXYNOS_MP3
+void gst_base_parse_get_initial_frame (GstBaseParse * parse, gboolean *initialized);
+void gst_base_parse_set_alp_mode (GstBaseParse * parse, gboolean alp_mde);
+void gst_base_parse_set_1st_frame (GstBaseParse * parse, guint frame_1st, gint bpf);
+void gst_base_parse_set_frame_info (GstBaseParse * parse, guint32 count, gint64 duration, guint32 avgbitrate);
+void gst_base_parse_set_buffer_info (GstBaseParse * parse, guint32 count, gint64 duration);
+void gst_base_parse_set_buffer_size (GstBaseParse * parse, guint32 byte_offset);
+#endif
 
 G_END_DECLS
 

@@ -148,6 +148,8 @@ struct _GstQueue2
   gboolean temp_remove;
 #ifdef GST_EXT_QUEUE_ENHANCEMENT
   gboolean temp_unlink;
+  guint64 buffer_pad_size;
+  guint64 latest_seek_pos;
 #endif
   FILE *temp_file;
   /* list of downloaded areas and the current area */

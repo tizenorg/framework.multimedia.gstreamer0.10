@@ -202,10 +202,6 @@ enum
 #define DEFAULT_TYPEFIND        FALSE
 #define DEFAULT_DO_TIMESTAMP    FALSE
 
-#ifdef GST_EXT_MODIFIED_DQBUF
-#define DEFAULT_YIELD_TIME      200
-#endif /* GST_EXT_MODIFIED_DQBUF */
-
 enum
 {
   PROP_0,
@@ -2417,13 +2413,6 @@ gst_base_src_loop (GstPad * pad)
 
   src = GST_BASE_SRC (GST_OBJECT_PARENT (pad));
 
-#ifdef GST_EXT_MODIFIED_DQBUF
-  if ((src->live_running) && (!src->blive_play)) {
-    sched_yield();
-    usleep(DEFAULT_YIELD_TIME);
-  }
-#endif /* GST_EXT_MODIFIED_DQBUF */
-
   GST_LIVE_LOCK (src);
 
   if (G_UNLIKELY (src->priv->flushing))
@@ -2950,10 +2939,6 @@ gst_base_src_set_playing (GstBaseSrc * basesrc, gboolean live_play)
     if (bclass->unlock)
       bclass->unlock (basesrc);
   }
-
-#ifdef GST_EXT_MODIFIED_DQBUF
-  basesrc->blive_play = live_play;
-#endif /* GST_EXT_MODIFIED_DQBUF */
 
   /* we are now able to grab the LIVE lock, when we get it, we can be
    * waiting for PLAYING while blocked in the LIVE cond or we can be waiting

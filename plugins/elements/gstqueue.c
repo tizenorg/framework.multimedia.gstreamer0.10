@@ -1551,8 +1551,21 @@ gst_queue_set_property (GObject * object,
       break;
 #ifdef GST_EXT_AV_RECORDING
     case PROP_EMPTY_BUFFERS:
-      queue->empty_buffers = g_value_get_boolean (value);
+    {
+      gboolean empty_buffers = g_value_get_boolean (value);
+
+      GST_INFO("set empty buffer : %d", empty_buffers);
+
+      if (empty_buffers) {
+        GST_INFO("flush queue");
+        gst_queue_locked_flush(queue);
+      }
+
+      queue->empty_buffers = empty_buffers;
+
+      GST_INFO("done");
       break;
+    }
 #endif
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);

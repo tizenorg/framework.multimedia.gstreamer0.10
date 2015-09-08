@@ -130,6 +130,11 @@ gst_collect_pads_init (GstCollectPads * pads, GstCollectPadsClass * g_class)
   pads->eospads = 0;
   pads->started = FALSE;
 
+#ifdef WFD_MODE
+  pads->wfd_mode = FALSE;
+  pads->first_collect = TRUE;
+#endif
+
   /* members to manage the pad list */
   pads->abidata.ABI.pad_lock = g_mutex_new ();
   pads->abidata.ABI.pad_cookie = 0;
@@ -1137,6 +1142,45 @@ gst_collect_pads_check_collected (GstCollectPads * pads)
      * we can get a busy loop here if the element does not pop from the collect
      * function
      */
+#ifdef WFD_MODE
+    if (pads->wfd_mode) {
+      /* Call plugin's callback for any stream in turn. 
+         CAUTION : This is specific for mpegtsmux for wifi display */
+      if (pads->first_collect) {
+        GST_WARNING("This is first collect...");
+        if (pads->queuedpads + pads->eospads >= pads->numpads) {
+          GST_WARNING("This is first to collect all streams...calling %s", GST_DEBUG_FUNCPTR_NAME (pads->func));
+          flow_ret = pads->func (pads, pads->user_data);
+
+          pads->first_collect = FALSE;
+        }
+      } else {
+        if (pads->queuedpads > 0) {
+          GST_DEBUG ("One of all active pads (%d, %d, %d) have data, calling %s",
+              pads->queuedpads, pads->eospads, pads->numpads, GST_DEBUG_FUNCPTR_NAME (pads->func));
+          flow_ret = pads->func (pads, pads->user_data);
+        }
+      }
+    } else {
+      while (((pads->queuedpads + pads->eospads) >= pads->numpads)) {
+        GST_DEBUG ("All active pads (%d + %d >= %d) have data, calling %s",
+            pads->queuedpads, pads->eospads, pads->numpads,
+            GST_DEBUG_FUNCPTR_NAME (pads->func));
+        flow_ret = pads->func (pads, pads->user_data);
+        collected = TRUE;
+
+        /* break on error */
+        if (flow_ret != GST_FLOW_OK)
+          break;
+        /* Don't keep looping after telling the element EOS or flushing */
+        if (pads->queuedpads == 0)
+          break;
+      }
+      if (!collected)
+        GST_DEBUG ("Not all active pads (%d) have data, continuing",
+            pads->numpads);
+    }
+#else
     while (((pads->queuedpads + pads->eospads) >= pads->numpads)) {
       GST_DEBUG ("All active pads (%d + %d >= %d) have data, calling %s",
           pads->queuedpads, pads->eospads, pads->numpads,
@@ -1154,6 +1198,7 @@ gst_collect_pads_check_collected (GstCollectPads * pads)
     if (!collected)
       GST_DEBUG ("Not all active pads (%d) have data, continuing",
           pads->numpads);
+#endif
   }
   return flow_ret;
 }
@@ -1468,3 +1513,17 @@ error:
     goto unlock_done;
   }
 }
+
+#ifdef WFD_MODE
+void
+gst_collect_pads_set_wfd_mode(GstCollectPads * pads, gboolean mode)
+{
+  g_return_if_fail (pads != NULL);
+  g_return_if_fail (GST_IS_COLLECT_PADS (pads));
+
+  GST_OBJECT_LOCK (pads);
+  pads->wfd_mode = mode;
+  GST_OBJECT_UNLOCK (pads);
+}
+#endif
+

@@ -78,9 +78,6 @@ struct _GstBaseSrc {
   GCond         *live_cond;
   gboolean       is_live;
   gboolean       live_running;
-#ifdef GST_EXT_MODIFIED_DQBUF
-  gboolean       blive_play;
-#endif /* GST_EXT_MODIFIED_DQBUF */
 
   /* MT-protected (with LOCK) */
   gint           blocksize;     /* size of buffers when operating push based */

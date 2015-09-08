@@ -33,6 +33,8 @@ G_BEGIN_DECLS
 #define GST_IS_COLLECT_PADS(obj)         (G_TYPE_CHECK_INSTANCE_TYPE((obj),GST_TYPE_COLLECT_PADS))
 #define GST_IS_COLLECT_PADS_CLASS(klass) (G_TYPE_CHECK_CLASS_TYPE((klass),GST_TYPE_COLLECT_PADS))
 
+#define WFD_MODE
+
 typedef struct _GstCollectData GstCollectData;
 typedef struct _GstCollectPads GstCollectPads;
 typedef struct _GstCollectPadsPrivate GstCollectPadsPrivate;
@@ -155,6 +157,11 @@ struct _GstCollectPads {
   /* with LOCK and PAD_LOCK*/
   gboolean       started;
 
+#ifdef WFD_MODE
+  /* mode for wifi display : If wfd is true, pads collection is working differently */
+  gboolean       wfd_mode;
+  gboolean       first_collect;
+#endif
   /*< private >*/
   union {
     struct {
@@ -217,6 +224,10 @@ GstBuffer *     gst_collect_pads_take_buffer    (GstCollectPads * pads, GstColle
                                                  guint size);
 guint           gst_collect_pads_flush          (GstCollectPads *pads, GstCollectData *data,
                                                  guint size);
+
+#ifdef WFD_MODE
+void            gst_collect_pads_set_wfd_mode   (GstCollectPads * pads, gboolean mode);
+#endif
 
 G_END_DECLS
 

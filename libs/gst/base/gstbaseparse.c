@@ -210,7 +210,12 @@
 
 #define GST_BASE_PARSE_FRAME_PRIVATE_FLAG_NOALLOC  (1 << 0)
 
+#ifdef GST_EXT_BASEPARSER_MODIFICATION
+#define MIN_FRAMES_TO_POST_BITRATE  1
+#else
 #define MIN_FRAMES_TO_POST_BITRATE 10
+#endif
+
 #define TARGET_DIFFERENCE          (20 * GST_SECOND)
 
 GST_DEBUG_CATEGORY_STATIC (gst_base_parse_debug);
@@ -330,6 +335,39 @@ struct _GstBaseParsePrivate
   gboolean detecting;
   GList *detect_buffers;
   guint detect_buffers_size;
+#ifdef GST_EXT_BASEPARSER_MODIFICATION
+  GstActivateMode expected_pad_mode; /* to get pad mode early */
+  gboolean first_frame; /* check first frame in base parser */
+  gint64 remove_from_total; /* remove zero padding */
+  gboolean accurate_index_seek;
+#endif
+
+#ifdef GST_BASEPARSE_ALP_EXYNOS_MP3
+  /* added for ALP mode (using 32KB Gstbuffer) */
+  guint32          alp_mp3_mode;
+
+  guint32          alp_seek_on;
+  /* ALP - for frame number */
+  guint32          alp_frame_1st;
+  guint32          alp_frame_count;
+  guint32          alp_frame_in_buffer;
+  guint32          alp_buffer_count;
+  guint32          alp_frame_avgbitrate;
+  /* ALP - for duration */
+  guint64          alp_duration_frame;
+  guint64          alp_duration_buffer;
+  guint64          alp_duration_buf_total;
+  guint64          alp_estimated_duration;
+  /* ALP - for position and byte count */
+  guint32          alp_size_frame_total;
+  guint32          alp_size_buf_one;
+  guint64          alp_size_buf_total;
+  guint32          alp_size_frame_1st;
+#endif
+#ifdef GST_EXT_BASEPARSE_ENABLE_WFD
+  /* added for wi-fi display mode */
+  gboolean          wfd_mode;
+#endif
 };
 
 typedef struct _GstBaseParseSeek
@@ -581,6 +619,13 @@ gst_base_parse_init (GstBaseParse * parse, GstBaseParseClass * bclass)
   parse->priv->adapter = gst_adapter_new ();
 
   parse->priv->pad_mode = GST_ACTIVATE_NONE;
+#ifdef GST_EXT_BASEPARSER_MODIFICATION
+  parse->priv->expected_pad_mode = GST_ACTIVATE_NONE;
+#endif
+
+#ifdef GST_EXT_BASEPARSE_ENABLE_WFD
+  parse->priv->wfd_mode = FALSE;
+#endif
 
 #if !GLIB_CHECK_VERSION (2, 31, 0)
   g_static_mutex_init (&parse->priv->index_lock);
@@ -756,6 +801,30 @@ gst_base_parse_reset (GstBaseParse * parse)
 
   parse->priv->last_ts = GST_CLOCK_TIME_NONE;
   parse->priv->last_offset = 0;
+#ifdef GST_EXT_BASEPARSER_MODIFICATION /* to do not calculate zero padding or something */
+  parse->priv->first_frame = TRUE;
+  parse->priv->remove_from_total = 0;
+  parse->priv->accurate_index_seek = TRUE;
+#endif
+
+#ifdef GST_BASEPARSE_ALP_EXYNOS_MP3
+  parse->priv->alp_mp3_mode = 0;
+  parse->priv->alp_seek_on = 0;
+
+  parse->priv->alp_frame_1st = 0;
+  parse->priv->alp_frame_count = 0;
+  parse->priv->alp_frame_in_buffer = 0;
+  parse->priv->alp_buffer_count = 0;
+
+  parse->priv->alp_duration_frame = 0;
+  parse->priv->alp_duration_buffer = 0;
+  parse->priv->alp_duration_buf_total = 0;
+
+  parse->priv->alp_size_frame_total = 0;
+  parse->priv->alp_size_buf_one = 0;
+  parse->priv->alp_size_buf_total = 0;
+  parse->priv->alp_size_frame_1st = 0;
+#endif
 
   if (parse->priv->pending_segment) {
     gst_event_unref (parse->priv->pending_segment);
@@ -1093,6 +1162,12 @@ gst_base_parse_sink_eventfunc (GstBaseParse * parse, GstEvent * event)
       parse->priv->last_ts = GST_CLOCK_TIME_NONE;
       parse->priv->frame._private_flags |=
           GST_BASE_PARSE_FRAME_PRIVATE_FLAG_NOALLOC;
+#ifdef GST_EXT_BASEPARSE_ENABLE_WFD
+      if (parse->priv->wfd_mode) {
+        parse->priv->offset = 0;
+        parse->priv->sync_offset = 0;
+      }
+#endif
       gst_base_parse_frame_free (&parse->priv->frame);
       break;
 
@@ -1231,8 +1306,30 @@ gst_base_parse_convert_default (GstBaseParse * parse,
   if (!parse->priv->framecount)
     return FALSE;
 
+#ifdef GST_EXT_BASEPARSER_MODIFICATION
+#ifdef GST_BASEPARSE_ALP_EXYNOS_MP3
+  if (parse->priv->alp_frame_1st) {
+    /* For duration, Estimation of spf using 1st frame */
+    duration = parse->priv->alp_duration_frame / GST_USECOND;
+    bytes = parse->priv->alp_size_frame_1st;
+    GST_DEBUG_OBJECT (parse, "bytes (%" G_GINT64_FORMAT ") frame_duration (%" G_GINT64_FORMAT ")", bytes, duration);
+  } else {
+    duration = parse->priv->acc_duration / GST_USECOND;
+    bytes = parse->priv->bytecount;
+  }
+#else
+  duration = parse->priv->acc_duration / GST_USECOND;
+  bytes = parse->priv->bytecount;
+#endif
+#else
   duration = parse->priv->acc_duration / GST_MSECOND;
   bytes = parse->priv->bytecount;
+#endif
+
+#ifdef GST_BASEPARSE_ALP_EXYNOS_LOG
+  GST_DEBUG_OBJECT (parse, "duration (%" G_GINT64_FORMAT ") <--  acc_duration (%" G_GINT64_FORMAT ")", duration, parse->priv->acc_duration);
+  GST_DEBUG_OBJECT (parse, "bytecount (%" G_GINT64_FORMAT ") framecount (%" G_GINT64_FORMAT ")", bytes, parse->priv->framecount);
+#endif  
 
   if (G_UNLIKELY (!duration || !bytes))
     return FALSE;
@@ -1241,7 +1338,13 @@ gst_base_parse_convert_default (GstBaseParse * parse,
     if (dest_format == GST_FORMAT_TIME) {
       /* BYTES -> TIME conversion */
       GST_DEBUG_OBJECT (parse, "converting bytes -> time");
+#ifdef GST_EXT_BASEPARSER_MODIFICATION
+      src_value = src_value - parse->priv->remove_from_total;
+#endif
       *dest_value = gst_util_uint64_scale (src_value, duration, bytes);
+#ifdef GST_EXT_BASEPARSER_MODIFICATION
+      *dest_value /= GST_USECOND;
+#endif
       *dest_value *= GST_MSECOND;
       GST_DEBUG_OBJECT (parse, "conversion result: %" G_GINT64_FORMAT " ms",
           *dest_value / GST_MSECOND);
@@ -1250,8 +1353,11 @@ gst_base_parse_convert_default (GstBaseParse * parse,
   } else if (src_format == GST_FORMAT_TIME) {
     if (dest_format == GST_FORMAT_BYTES) {
       GST_DEBUG_OBJECT (parse, "converting time -> bytes");
-      *dest_value = gst_util_uint64_scale (src_value / GST_MSECOND, bytes,
-          duration);
+#ifdef GST_EXT_BASEPARSER_MODIFICATION
+      *dest_value = gst_util_uint64_scale (src_value / GST_USECOND, bytes, duration);
+#else
+      *dest_value = gst_util_uint64_scale (src_value / GST_MSECOND, bytes, duration);
+#endif
       GST_DEBUG_OBJECT (parse,
           "time %" G_GINT64_FORMAT " ms in bytes = %" G_GINT64_FORMAT,
           src_value / GST_MSECOND, *dest_value);
@@ -1301,6 +1407,13 @@ gst_base_parse_update_duration (GstBaseParse * baseparse)
               gst_message_new_duration (GST_OBJECT (parse),
                   GST_FORMAT_TIME, dest_value));
           parse->priv->estimated_drift = 0;
+#ifdef GST_BASEPARSE_ALP_EXYNOS_MP3
+          if (parse->priv->alp_mp3_mode) {
+            parse->priv->alp_estimated_duration = dest_value;
+            GST_INFO_OBJECT (parse, "[message]  dest_value(%" GST_TIME_FORMAT") estimated duration to (%" G_GUINT64_FORMAT")",
+                                             GST_TIME_ARGS (dest_value), (parse->priv->estimated_duration));
+          }
+#endif
         }
         parse->priv->estimated_duration = dest_value;
         GST_LOG_OBJECT (parse,
@@ -1328,7 +1441,20 @@ gst_base_parse_post_bitrates (GstBaseParse * parse, gboolean post_min,
     if (taglist == NULL)
       taglist = gst_tag_list_new ();
 
-    parse->priv->posted_avg_bitrate = parse->priv->avg_bitrate;
+#ifdef GST_BASEPARSE_ALP_EXYNOS_MP3
+    if (parse->priv->alp_frame_1st) {
+      if (parse->priv->bitrate) {
+        parse->priv->avg_bitrate = parse->priv->bitrate;
+      } else {
+        parse->priv->posted_avg_bitrate = parse->priv->alp_frame_avgbitrate;
+        parse->priv->avg_bitrate = parse->priv->alp_frame_avgbitrate;
+      }
+    } else {
+      parse->priv->posted_avg_bitrate = parse->priv->avg_bitrate;
+    }
+#else
+      parse->priv->posted_avg_bitrate = parse->priv->avg_bitrate;
+#endif
     gst_tag_list_add (taglist, GST_TAG_MERGE_REPLACE, GST_TAG_BITRATE,
         parse->priv->avg_bitrate, NULL);
   }
@@ -1668,16 +1794,27 @@ gst_base_parse_handle_and_push_frame (GstBaseParse * parse,
   }
 
   /* some one-time start-up */
+#ifdef GST_BASEPARSE_ALP_EXYNOS_MP3
+  if (parse->priv->alp_mp3_mode) {
+    if (parse->priv->alp_frame_1st) {           //[need again check] parse->priv->framecount =0 
+      gst_base_parse_check_seekability (parse);
+      gst_base_parse_check_upstream (parse);
+    }
+  } else {
+    if (G_UNLIKELY (!parse->priv->framecount)) {
+      gst_base_parse_check_seekability (parse);
+      gst_base_parse_check_upstream (parse);
+    }
+  }
+#else
   if (G_UNLIKELY (!parse->priv->framecount)) {
     gst_base_parse_check_seekability (parse);
     gst_base_parse_check_upstream (parse);
   }
+#endif
 
-  GST_LOG_OBJECT (parse,
-      "parsing frame at offset %" G_GUINT64_FORMAT
-      " (%#" G_GINT64_MODIFIER "x) of size %d",
-      GST_BUFFER_OFFSET (buffer), GST_BUFFER_OFFSET (buffer),
-      GST_BUFFER_SIZE (buffer));
+  GST_LOG_OBJECT (parse, "parsing frame at offset %" G_GUINT64_FORMAT " (%#" G_GINT64_MODIFIER "x) of size %d",
+      GST_BUFFER_OFFSET (buffer), GST_BUFFER_OFFSET (buffer), GST_BUFFER_SIZE (buffer));
 
   /* use default handler to provide initial (upstream) metadata */
   gst_base_parse_parse_frame (parse, frame);
@@ -1689,6 +1826,14 @@ gst_base_parse_handle_and_push_frame (GstBaseParse * parse,
   buffer = frame->buffer;
   /* subclass must play nice */
   g_return_val_if_fail (buffer != NULL, GST_FLOW_ERROR);
+
+#ifdef GST_EXT_BASEPARSER_MODIFICATION
+  if (parse->priv->first_frame) {
+    parse->priv->remove_from_total = GST_BUFFER_OFFSET (buffer);
+    GST_DEBUG_OBJECT (parse, "first frame has offset %" G_GINT64_FORMAT ". remove from total", parse->priv->remove_from_total);
+    parse->priv->first_frame = FALSE;
+  }
+#endif
 
   /* check if subclass/format can provide ts.
    * If so, that allows and enables extra seek and duration determining options */
@@ -1719,10 +1864,32 @@ gst_base_parse_handle_and_push_frame (GstBaseParse * parse,
   /* again use default handler to add missing metadata;
    * we may have new information on frame properties */
   gst_base_parse_parse_frame (parse, frame);
-  if (GST_BUFFER_TIMESTAMP_IS_VALID (buffer) &&
-      GST_BUFFER_DURATION_IS_VALID (buffer)) {
-    parse->priv->next_ts =
-        GST_BUFFER_TIMESTAMP (buffer) + GST_BUFFER_DURATION (buffer);
+
+#ifdef GST_BASEPARSE_ALP_EXYNOS_LOG
+  if (parse->priv->alp_mp3_mode) {
+    GST_INFO_OBJECT (parse, "framecount(%" G_GINT64_FORMAT "): next_ts(%" GST_TIME_FORMAT ") frame_duration(%" GST_TIME_FORMAT ")",
+                                        parse->priv->framecount, GST_TIME_ARGS(parse->priv->next_ts), GST_TIME_ARGS(parse->priv->frame_duration));
+  }
+#endif
+
+  if (GST_BUFFER_TIMESTAMP_IS_VALID (buffer) && GST_BUFFER_DURATION_IS_VALID (buffer)) {
+#ifdef GST_BASEPARSE_ALP_EXYNOS_MP3
+    if (parse->priv->alp_mp3_mode) {
+      /*push_frame --> move to here for SEEK test */
+      GST_BUFFER_TIMESTAMP (buffer) = parse->priv->alp_duration_buf_total;
+      GST_BUFFER_DURATION (buffer) = parse->priv->alp_duration_buffer;
+    }
+#endif
+    parse->priv->next_ts = GST_BUFFER_TIMESTAMP (buffer) + GST_BUFFER_DURATION (buffer);
+
+
+#ifdef GST_BASEPARSE_ALP_EXYNOS_LOG
+    if (parse->priv->alp_mp3_mode) {
+      GST_INFO_OBJECT (parse, "Update : next_ts(%" GST_TIME_FORMAT ") =  timestamp(%" GST_TIME_FORMAT ") + duration(%" GST_TIME_FORMAT ")",
+                                         GST_TIME_ARGS(parse->priv->next_ts), GST_TIME_ARGS(GST_BUFFER_TIMESTAMP (buffer)), GST_TIME_ARGS( GST_BUFFER_DURATION (buffer)));
+    }
+#endif
+
   } else {
     /* we lost track, do not produce bogus time next time around
      * (probably means parser subclass has given up on parsing as well) */
@@ -1730,11 +1897,29 @@ gst_base_parse_handle_and_push_frame (GstBaseParse * parse,
     parse->priv->next_ts = GST_CLOCK_TIME_NONE;
   }
 
-  if (parse->priv->upstream_seekable && parse->priv->exact_position &&
-      GST_BUFFER_TIMESTAMP_IS_VALID (buffer))
-    gst_base_parse_add_index_entry (parse, offset,
-        GST_BUFFER_TIMESTAMP (buffer),
-        !GST_BUFFER_FLAG_IS_SET (buffer, GST_BUFFER_FLAG_DELTA_UNIT), FALSE);
+#ifdef GST_BASEPARSE_ALP_EXYNOS_MP3
+  if (parse->priv->alp_mp3_mode) {
+    /* for NEXT Play */
+    if (parse->priv->alp_seek_on) {
+      offset = parse->priv->alp_size_buf_total;
+      parse->priv->alp_seek_on = 0;
+    }
+    if (parse->priv->upstream_seekable && parse->priv->exact_position && GST_BUFFER_TIMESTAMP_IS_VALID (buffer)) {
+      gst_base_parse_add_index_entry (parse, offset, parse->priv->alp_duration_buf_total,
+          !GST_BUFFER_FLAG_IS_SET (buffer, GST_BUFFER_FLAG_DELTA_UNIT), FALSE);
+    }
+  } else {
+    if (parse->priv->upstream_seekable && parse->priv->exact_position && GST_BUFFER_TIMESTAMP_IS_VALID (buffer)) {
+      gst_base_parse_add_index_entry (parse, offset, GST_BUFFER_TIMESTAMP (buffer),
+          !GST_BUFFER_FLAG_IS_SET (buffer, GST_BUFFER_FLAG_DELTA_UNIT), FALSE);
+    }
+  }
+#else
+    if (parse->priv->upstream_seekable && parse->priv->exact_position && GST_BUFFER_TIMESTAMP_IS_VALID (buffer)) {
+      gst_base_parse_add_index_entry (parse, offset, GST_BUFFER_TIMESTAMP (buffer),
+          !GST_BUFFER_FLAG_IS_SET (buffer, GST_BUFFER_FLAG_DELTA_UNIT), FALSE);
+    }
+#endif
 
   /* First buffers are dropped, this means that the subclass needs more
    * frames to decide on the format and queues them internally */
@@ -1761,6 +1946,18 @@ gst_base_parse_handle_and_push_frame (GstBaseParse * parse,
       gst_base_parse_push_frame (parse, queued_frame);
     }
   }
+
+#ifdef GST_BASEPARSE_ALP_EXYNOS_LOG
+  if (parse->priv->alp_mp3_mode) {
+   GST_INFO_OBJECT (parse, "-----------------------------");
+   GST_INFO_OBJECT (parse, "[ALP] alp_size_buf_one(%d) alp_size_buf_total(%" G_GUINT64_FORMAT ")",parse->priv->alp_size_buf_one,  parse->priv->alp_size_buf_total);
+   GST_INFO_OBJECT (parse, "[ALP] alp_duration_buf_total(%" GST_TIME_FORMAT ")", GST_TIME_ARGS(parse->priv->alp_duration_buf_total));
+   GST_INFO_OBJECT (parse, "[GBUF] size(%d) offset(%" G_GUINT64_FORMAT ")",GST_BUFFER_SIZE (buffer), GST_BUFFER_OFFSET (buffer));
+   GST_INFO_OBJECT (parse, "[GBUF] timestamp(%" GST_TIME_FORMAT ") duration(%" GST_TIME_FORMAT ")",
+                                      GST_TIME_ARGS(GST_BUFFER_TIMESTAMP (buffer)), GST_TIME_ARGS(GST_BUFFER_DURATION (buffer)));
+   GST_INFO_OBJECT (parse, "-----------------------------");
+  }
+#endif
 
   return gst_base_parse_push_frame (parse, frame);
 }
@@ -1804,19 +2001,54 @@ gst_base_parse_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
       GST_TIME_ARGS (GST_BUFFER_DURATION (buffer)));
 
   /* update stats */
-  parse->priv->bytecount += GST_BUFFER_SIZE (buffer);
-  if (G_LIKELY (!(frame->flags & GST_BASE_PARSE_FRAME_FLAG_NO_FRAME))) {
-    parse->priv->framecount++;
-    if (GST_BUFFER_DURATION_IS_VALID (buffer)) {
-      parse->priv->acc_duration += GST_BUFFER_DURATION (buffer);
+#ifdef GST_BASEPARSE_ALP_EXYNOS_MP3
+  if (parse->priv->alp_mp3_mode) {
+    parse->priv->bytecount += GST_BUFFER_SIZE (buffer);
+  } else {
+    parse->priv->bytecount += GST_BUFFER_SIZE (buffer);
+    if (G_LIKELY (!(frame->flags & GST_BASE_PARSE_FRAME_FLAG_NO_FRAME))) {
+      parse->priv->framecount++;
+      if (GST_BUFFER_DURATION_IS_VALID (buffer)) {
+        parse->priv->acc_duration += GST_BUFFER_DURATION (buffer);
+      }
     }
   }
+#else
+    parse->priv->bytecount += GST_BUFFER_SIZE (buffer);
+    if (G_LIKELY (!(frame->flags & GST_BASE_PARSE_FRAME_FLAG_NO_FRAME))) {
+      parse->priv->framecount++;
+      if (GST_BUFFER_DURATION_IS_VALID (buffer)) {
+        parse->priv->acc_duration += GST_BUFFER_DURATION (buffer);
+      }
+    }
+#endif
+
+#ifdef GST_BASEPARSE_ALP_EXYNOS_LOG
+  if (parse->priv->alp_mp3_mode) {
+    GST_INFO_OBJECT (parse, "frame(%"G_GUINT64_FORMAT") bytecount(%"G_GUINT64_FORMAT") acc_duration(%"GST_TIME_FORMAT")",
+                                        parse->priv->framecount, parse->priv->bytecount, GST_TIME_ARGS(parse->priv->acc_duration));
+  }
+#endif
+
   /* 0 means disabled */
-  if (parse->priv->update_interval < 0)
-    parse->priv->update_interval = 50;
-  else if (parse->priv->update_interval > 0 &&
-      ((parse->priv->framecount-1) % parse->priv->update_interval) == 0)
-    gst_base_parse_update_duration (parse);
+#ifdef GST_BASEPARSE_ALP_EXYNOS_MP3
+  if (parse->priv->alp_mp3_mode) {
+    if (parse->priv->update_interval < 0)
+      parse->priv->update_interval = 50;
+    else if (parse->priv->update_interval > 0 && parse->priv->framecount > 0)
+      gst_base_parse_update_duration (parse);
+  } else {
+    if (parse->priv->update_interval < 0)
+      parse->priv->update_interval = 50;
+    else if (parse->priv->update_interval > 0 && ((parse->priv->framecount-1) % parse->priv->update_interval) == 0)
+      gst_base_parse_update_duration (parse);
+  }
+#else
+    if (parse->priv->update_interval < 0)
+      parse->priv->update_interval = 50;
+    else if (parse->priv->update_interval > 0 && ((parse->priv->framecount-1) % parse->priv->update_interval) == 0)
+      gst_base_parse_update_duration (parse);
+#endif
 
   if (GST_BUFFER_TIMESTAMP_IS_VALID (buffer))
     last_start = last_stop = GST_BUFFER_TIMESTAMP (buffer);
@@ -1921,6 +2153,11 @@ gst_base_parse_push_frame (GstBaseParse * parse, GstBaseParseFrame * frame)
   /* update bitrates and optionally post corresponding tags
    * (following newsegment) */
   gst_base_parse_update_bitrates (parse, frame);
+
+#ifdef GST_BASEPARSE_ALP_EXYNOS_MP3
+  if (parse->priv->alp_mp3_mode)
+    parse->priv->alp_frame_1st = 0;
+#endif
 
   if (G_UNLIKELY (parse->priv->pending_events)) {
     GList *l;
@@ -2306,9 +2543,11 @@ gst_base_parse_chain (GstPad * pad, GstBuffer * buffer)
         parse->priv->detect_buffers = NULL;
         parse->priv->detect_buffers_size = 0;
       } else {
-        parse->priv->detect_buffers =
-            g_list_append (parse->priv->detect_buffers, buffer);
-        parse->priv->detect_buffers_size += GST_BUFFER_SIZE (buffer);
+        if(G_LIKELY (buffer)) {
+          parse->priv->detect_buffers =
+              g_list_append (parse->priv->detect_buffers, buffer);
+          parse->priv->detect_buffers_size += GST_BUFFER_SIZE (buffer);
+        }
         return GST_FLOW_OK;
       }
     } else {
@@ -2429,10 +2668,12 @@ gst_base_parse_chain (GstPad * pad, GstBuffer * buffer)
            * fragment coming later, hopefully subclass skips efficiently ... */
           timestamp = gst_adapter_prev_timestamp (parse->priv->adapter, NULL);
           outbuf = gst_adapter_take_buffer (parse->priv->adapter, skip);
-          outbuf = gst_buffer_make_metadata_writable (outbuf);
-          GST_BUFFER_TIMESTAMP (outbuf) = timestamp;
-          parse->priv->buffers_pending =
-              g_slist_prepend (parse->priv->buffers_pending, outbuf);
+          if(G_LIKELY(outbuf)){
+            outbuf = gst_buffer_make_metadata_writable (outbuf);
+            GST_BUFFER_TIMESTAMP (outbuf) = timestamp;
+            parse->priv->buffers_pending =
+                g_slist_prepend (parse->priv->buffers_pending, outbuf);
+          }
           outbuf = NULL;
         } else {
           gst_adapter_flush (parse->priv->adapter, skip);
@@ -2481,6 +2722,8 @@ gst_base_parse_chain (GstPad * pad, GstBuffer * buffer)
 
     /* FIXME: Would it be more efficient to make a subbuffer instead? */
     outbuf = gst_adapter_take_buffer (parse->priv->adapter, fsize);
+    if(G_UNLIKELY(!outbuf))
+      goto adapter_underflow;
     outbuf = gst_buffer_make_metadata_writable (outbuf);
 
     /* Subclass may want to know the data offset */
@@ -2509,6 +2752,12 @@ invalid_min:
     GST_ELEMENT_ERROR (parse, STREAM, FAILED, (NULL),
         ("min_size evolution %d -> %d; breaking to avoid looping",
             old_min_size, min_size));
+    return GST_FLOW_ERROR;
+  }
+adapter_underflow:
+  {
+    GST_ERROR_OBJECT (parse, "Failed to adapter take buffer adapter->size:%d, fsize:%d.",
+        parse->priv->adapter->size,fsize);
     return GST_FLOW_ERROR;
   }
 }
@@ -2542,9 +2791,15 @@ gst_base_parse_pull_range (GstBaseParse * parse, guint size,
   }
 
   /* refill the cache */
-  ret =
-      gst_pad_pull_range (parse->sinkpad, parse->priv->offset, MAX (size,
-          64 * 1024), &parse->priv->cache);
+#ifdef GST_BASEPARSE_ALP_EXYNOS_MP3
+  if (parse->priv->alp_mp3_mode)
+    ret = gst_pad_pull_range (parse->sinkpad, parse->priv->offset, MAX (size, 32 * 1024), &parse->priv->cache);
+  else
+    ret = gst_pad_pull_range (parse->sinkpad, parse->priv->offset, MAX (size, 64 * 1024), &parse->priv->cache);
+#else
+    ret = gst_pad_pull_range (parse->sinkpad, parse->priv->offset, MAX (size, 64 * 1024), &parse->priv->cache);
+#endif
+
   if (ret != GST_FLOW_OK) {
     parse->priv->cache = NULL;
     return ret;
@@ -2670,7 +2925,15 @@ gst_base_parse_scan_frame (GstBaseParse * parse, GstBaseParseClass * klass,
    * maybe it does not need this much, but in the latter case, we know we are
    * in pull mode here and might as well try to read and supply more anyway
    * (so does the buffer caching mechanism) */
-  fsize = 64 * 1024;
+#ifdef GST_BASEPARSE_ALP_EXYNOS_MP3
+  if (parse->priv->alp_mp3_mode) {
+    fsize = 32 * 1024;
+   } else {
+    fsize = 64 * 1024;
+  }
+#else
+    fsize = 64 * 1024;
+#endif
 
   while (TRUE) {
     gboolean res;
@@ -2682,6 +2945,7 @@ gst_base_parse_scan_frame (GstBaseParse * parse, GstBaseParseClass * klass,
     old_min_size = min_size;
 
     ret = gst_base_parse_pull_range (parse, min_size, &buffer);
+
     if (ret != GST_FLOW_OK)
       goto done;
 
@@ -2705,7 +2969,15 @@ gst_base_parse_scan_frame (GstBaseParse * parse, GstBaseParseClass * klass,
           GST_ERROR_OBJECT (parse, "Failed to detect format but draining");
           return GST_FLOW_ERROR;
         } else {
-          fsize += 64 * 1024;
+#ifdef GST_BASEPARSE_ALP_EXYNOS_MP3
+          if (parse->priv->alp_mp3_mode) {
+            fsize += 32 * 1024;
+          } else {
+            fsize += 64 * 1024;
+          }
+#else
+            fsize += 64 * 1024;
+#endif
           gst_buffer_unref (buffer);
           continue;
         }
@@ -2722,6 +2994,7 @@ gst_base_parse_scan_frame (GstBaseParse * parse, GstBaseParseClass * klass,
     skip = -1;
     gst_base_parse_frame_update (parse, frame, buffer);
     res = klass->check_valid_frame (parse, frame, &fsize, &skip);
+
     gst_buffer_replace (&frame->buffer, NULL);
     if (res) {
       parse->priv->drain = FALSE;
@@ -2748,7 +3021,15 @@ gst_base_parse_scan_frame (GstBaseParse * parse, GstBaseParseClass * klass,
       parse->priv->discont = TRUE;
       /* something changed at least; nullify loop check */
       if (fsize == G_MAXUINT)
-        fsize = old_min_size + 64 * 1024;
+#ifdef GST_BASEPARSE_ALP_EXYNOS_MP3
+        if (parse->priv->alp_mp3_mode) {
+          fsize = old_min_size + 32 * 1024;
+        } else {
+          fsize = old_min_size + 64 * 1024;
+        }
+#else
+          fsize = old_min_size + 64 * 1024;
+#endif
       old_min_size = 0;
     }
     /* skip == 0 should imply subclass set min_size to need more data;
@@ -2783,8 +3064,23 @@ gst_base_parse_scan_frame (GstBaseParse * parse, GstBaseParseClass * klass,
   }
 
   parse->priv->offset += fsize;
-
   frame->buffer = outbuf;
+
+#ifdef GST_BASEPARSE_ALP_EXYNOS_LOG
+  if (parse->priv->alp_mp3_mode) {
+    GST_INFO_OBJECT (parse, "-----------------------------");
+    GST_INFO_OBJECT (parse, "[ALP] offset(%" G_GUINT64_FORMAT ") +=  fsize(%d)",parse->priv->offset, fsize);
+    GST_INFO_OBJECT (parse, "[ALP] alp_mp3_mode(%d) alp_frame_1st(%d)",parse->priv->alp_mp3_mode,  parse->priv->alp_frame_1st);
+    GST_INFO_OBJECT (parse, "[ALP] alp_frame_in_buffer(%d) alp_duration_frame(%" G_GUINT64_FORMAT ")",parse->priv->alp_frame_in_buffer,  parse->priv->alp_duration_frame);
+    GST_INFO_OBJECT (parse, "[ALP] alp_frame_count(%d) alp_duration_frame(%" GST_TIME_FORMAT ")",parse->priv->alp_frame_count,  GST_TIME_ARGS(parse->priv->alp_duration_frame));
+    GST_INFO_OBJECT (parse, "[ALP] alp_buffer_count(%d) alp_duration_buffer(%" GST_TIME_FORMAT ")",parse->priv->alp_buffer_count,  GST_TIME_ARGS(parse->priv->alp_duration_buffer));
+    GST_INFO_OBJECT (parse, "[ALP] alp_size_buf_one(%d) alp_size_buf_total(%" G_GUINT64_FORMAT ")",parse->priv->alp_size_buf_one,  parse->priv->alp_size_buf_total);
+    GST_INFO_OBJECT (parse, "[ALP] alp_duration_buf_total(%" GST_TIME_FORMAT ")",GST_TIME_ARGS( parse->priv->alp_duration_buf_total));
+    GST_INFO_OBJECT (parse, "-----------------------------");
+    GST_INFO_OBJECT (parse, "[OBUF] szie(%d) offset(%" G_GUINT64_FORMAT ")",GST_BUFFER_SIZE (outbuf), GST_BUFFER_OFFSET (outbuf));
+    GST_INFO_OBJECT (parse, "-----------------------------");
+  }
+#endif
 
 done:
   return ret;
@@ -2972,7 +3268,10 @@ gst_base_parse_sink_activate_push (GstPad * pad, gboolean active)
   parse = GST_BASE_PARSE (gst_pad_get_parent (pad));
 
   GST_DEBUG_OBJECT (parse, "sink activate push %d", active);
-
+#ifdef GST_EXT_BASEPARSER_MODIFICATION
+  /* to know early what is the mode */
+  parse->priv->expected_pad_mode = active ? GST_ACTIVATE_PUSH : GST_ACTIVATE_NONE;
+#endif
   result = gst_base_parse_activate (parse, active);
 
   if (result)
@@ -2993,7 +3292,10 @@ gst_base_parse_sink_activate_pull (GstPad * sinkpad, gboolean active)
   parse = GST_BASE_PARSE (gst_pad_get_parent (sinkpad));
 
   GST_DEBUG_OBJECT (parse, "activate pull %d", active);
-
+#ifdef GST_EXT_BASEPARSER_MODIFICATION
+  /* to know early what is the mode */
+  parse->priv->expected_pad_mode = active ? GST_ACTIVATE_PULL : GST_ACTIVATE_NONE;
+#endif
   result = gst_base_parse_activate (parse, active);
 
   if (result) {
@@ -3266,8 +3568,18 @@ gst_base_parse_get_duration (GstBaseParse * parse, GstFormat format,
     res = gst_base_parse_convert (parse, parse->priv->duration_fmt,
         parse->priv->duration, format, (gint64 *) duration);
   } else if (format == GST_FORMAT_TIME && parse->priv->estimated_duration != -1) {
+#ifdef GST_BASEPARSE_ALP_EXYNOS_MP3
+    if (parse->priv->alp_mp3_mode) {
+      GST_LOG_OBJECT (parse, "using ALP estimated duration");
+      *duration = parse->priv->alp_estimated_duration;
+    } else {
+      GST_LOG_OBJECT (parse, "using estimated duration");
+      *duration = parse->priv->estimated_duration;
+    }
+#else
     GST_LOG_OBJECT (parse, "using estimated duration");
     *duration = parse->priv->estimated_duration;
+#endif
     res = TRUE;
   }
 
@@ -3761,12 +4073,27 @@ gst_base_parse_handle_seek (GstBaseParse * parse, GstEvent * event)
    * and the requested segment is maintained exactly, not adjusted any way */
   accurate = flags & GST_SEEK_FLAG_ACCURATE;
 
+#ifndef GST_EXT_BASEPARSER_MODIFICATION
   /* maybe we can be accurate for (almost) free */
   gst_base_parse_find_offset (parse, seeksegment.last_stop, TRUE, &start_ts);
   if (seeksegment.last_stop <= start_ts + TARGET_DIFFERENCE) {
     GST_DEBUG_OBJECT (parse, "accurate seek possible");
     accurate = TRUE;
   }
+#else
+  if ( parse->priv->accurate_index_seek) {
+    /* maybe we can be accurate for (almost) free */
+    gst_base_parse_find_offset (parse, seeksegment.last_stop, TRUE, &start_ts);
+    if (seeksegment.last_stop <= start_ts + TARGET_DIFFERENCE) {
+      GST_DEBUG_OBJECT (parse, "accurate seek possible");
+      accurate = TRUE;
+    }
+  } else {
+    GST_DEBUG_OBJECT (parse, "accurate seek FALSE");
+    accurate = FALSE;
+  }
+#endif
+
   if (accurate) {
     GstClockTime startpos = seeksegment.last_stop;
 
@@ -3776,8 +4103,7 @@ gst_base_parse_handle_seek (GstBaseParse * parse, GstEvent * event)
     else
       startpos -= parse->priv->lead_in_ts;
     seekpos = gst_base_parse_find_offset (parse, startpos, TRUE, &start_ts);
-    seekstop = gst_base_parse_find_offset (parse, seeksegment.stop, FALSE,
-        NULL);
+    seekstop = gst_base_parse_find_offset (parse, seeksegment.stop, FALSE, NULL);
   } else {
     start_ts = seeksegment.last_stop;
     dstformat = GST_FORMAT_BYTES;
@@ -3795,6 +4121,16 @@ gst_base_parse_handle_seek (GstBaseParse * parse, GstEvent * event)
   GST_DEBUG_OBJECT (parse,
       "seek stop %" G_GINT64_FORMAT " in bytes: %" G_GINT64_FORMAT,
       seeksegment.stop, seekstop);
+
+#ifdef GST_BASEPARSE_ALP_EXYNOS_MP3
+    if (parse->priv->alp_mp3_mode) {
+      /* seek event on, so update new information */
+      parse->priv->alp_seek_on = 1;
+      parse->priv->alp_size_buf_total = seekpos;
+      parse->priv->alp_duration_buf_total = start_ts;
+      GST_INFO_OBJECT (parse,  "[SEEK] seek start alp_duration_buf_total (%" GST_TIME_FORMAT ") in alp_size_buf_total: %" G_GINT64_FORMAT, GST_TIME_ARGS(start_ts), seekpos);
+    }
+#endif
 
   if (parse->priv->pad_mode == GST_ACTIVATE_PULL) {
     gint64 last_stop;
@@ -3916,7 +4252,7 @@ gst_base_parse_handle_seek (GstBaseParse * parse, GstEvent * event)
        seek event (in bytes) to upstream. Segment / flush handling happens
        in corresponding src event handlers */
     GST_DEBUG_OBJECT (parse, "seek in PUSH mode");
-    if (seekstop >= 0 && seekpos <= seekpos)
+    if (seekstop >= 0)
       seekstop = seekpos;
     new_event = gst_event_new_seek (rate, GST_FORMAT_BYTES, flags,
         GST_SEEK_TYPE_SET, seekpos, stop_type, seekstop);
@@ -4118,3 +4454,151 @@ gst_base_parse_change_state (GstElement * element, GstStateChange transition)
 
   return result;
 }
+
+#ifdef GST_EXT_BASEPARSER_MODIFICATION /* get baseparse private param. ex. for amr index table, aac duration */
+void
+gst_base_parse_get_upstream_size (GstBaseParse * parse, gint64 * upstream_size)
+{
+  GST_BASE_PARSE_INDEX_LOCK (parse);
+  *upstream_size = parse->priv->upstream_size;
+  GST_INFO_OBJECT (parse, "get upstream_size param for child parser : (%"G_GUINT64_FORMAT")", parse->priv->upstream_size);
+  GST_BASE_PARSE_INDEX_UNLOCK (parse);
+}
+
+void
+gst_base_parse_get_index_last_offset (GstBaseParse * parse, gint64 * index_last_offset)
+{
+  GST_BASE_PARSE_INDEX_LOCK (parse);
+  *index_last_offset = parse->priv->index_last_offset;
+  GST_INFO_OBJECT (parse, "get index_last_offset param for child parser : (%"G_GUINT64_FORMAT")", parse->priv->index_last_offset);
+  GST_BASE_PARSE_INDEX_UNLOCK (parse);
+}
+
+void
+gst_base_parse_get_index_last_ts (GstBaseParse * parse, GstClockTime * index_last_ts)
+{
+  GST_BASE_PARSE_INDEX_LOCK (parse);
+  *index_last_ts = parse->priv->index_last_ts;
+  GST_INFO_OBJECT (parse, "get index_last_ts param for child parser : (%"GST_TIME_FORMAT")", GST_TIME_ARGS(parse->priv->index_last_ts));
+  GST_BASE_PARSE_INDEX_UNLOCK (parse);
+}
+
+void
+gst_base_parse_get_pad_mode (GstBaseParse * parse, GstActivateMode * pad_mode)
+{
+  GST_BASE_PARSE_INDEX_LOCK (parse);
+  *pad_mode = parse->priv->expected_pad_mode;
+  GST_INFO_OBJECT (parse, "get pad_mode param for child parse: mode num (%d)", parse->priv->expected_pad_mode);
+  GST_BASE_PARSE_INDEX_UNLOCK (parse);
+}
+
+void
+gst_base_parse_set_seek_mode (GstBaseParse * parse, gboolean seek_mode)
+{
+  g_return_if_fail (parse != NULL);
+  parse->priv->accurate_index_seek= seek_mode;
+  if (seek_mode)
+    GST_INFO_OBJECT (parse, "accurate seek mode ON");
+  else
+    GST_INFO_OBJECT (parse, "accurate seek mode OFF - for large file (over 50MByte)");  
+}
+#endif
+
+#ifdef GST_BASEPARSE_ALP_EXYNOS_MP3
+void
+gst_base_parse_get_initial_frame (GstBaseParse * parse, gboolean *initialized)
+{
+  GST_BASE_PARSE_INDEX_LOCK (parse);
+  if(parse->priv->framecount == 0) {
+    *initialized = FALSE;
+    GST_INFO_OBJECT (parse, "get only initial frame indicator - framecount is always 0 (%d)", parse->priv->framecount);
+  } else {
+    *initialized = TRUE;
+  }
+  GST_BASE_PARSE_INDEX_UNLOCK (parse);  
+}
+
+void
+gst_base_parse_set_alp_mode (GstBaseParse * parse, gboolean alp_mde)
+{
+  g_return_if_fail (parse != NULL);
+  parse->priv->alp_mp3_mode= alp_mde;
+  if (alp_mde) {
+    GST_INFO_OBJECT (parse, "=============================");
+    GST_INFO_OBJECT (parse, "ALP MP3 SET alp_mp3_mode [%d]", parse->priv->alp_mp3_mode);
+    GST_INFO_OBJECT (parse, "=============================");
+  }
+}
+
+void
+gst_base_parse_set_1st_frame (GstBaseParse * parse, guint frame_1st, gint bpf)
+{
+  g_return_if_fail (parse != NULL);
+  parse->priv->alp_frame_1st = frame_1st;
+  parse->priv->alp_size_frame_1st = bpf;
+  GST_INFO_OBJECT (parse, "SET alp_frame_1st flag (%d), bpf_1st (%d)", parse->priv->alp_frame_1st, parse->priv->alp_size_frame_1st);
+}
+
+void
+gst_base_parse_set_frame_info (GstBaseParse * parse, guint32 count, gint64 duration, guint32 avgbitrate)
+{
+  g_return_if_fail (parse != NULL);
+  parse->priv->alp_frame_in_buffer = count;
+  parse->priv->alp_duration_frame = duration;
+  parse->priv->alp_frame_avgbitrate = avgbitrate;
+
+  parse->priv->alp_frame_count += count;
+  parse->priv->framecount = parse->priv->alp_frame_count;
+  GST_INFO_OBJECT (parse, "SET alp_frame_count(%d) VS  parse->framecount(%d) avgbitrate(%d)", parse->priv->alp_frame_count, parse->priv->framecount, avgbitrate);
+  GST_INFO_OBJECT (parse, " parse->framecount(%"G_GUINT64_FORMAT") parse->offset(%"G_GUINT64_FORMAT")", parse->priv->framecount, parse->priv->offset);
+}
+
+void
+gst_base_parse_set_buffer_info (GstBaseParse * parse, guint32 count, gint64 duration)
+{
+  g_return_if_fail (parse != NULL);
+  parse->priv->alp_buffer_count = count;
+  parse->priv->alp_duration_buffer = duration;
+  parse->priv->acc_duration += duration;
+
+  if (parse->priv->offset == 0) {
+     parse->priv->alp_duration_buf_total = 0;      //reset for continue next play
+  } else {
+     if(parse->priv->alp_seek_on) {
+      parse->priv->alp_seek_on = 1;      // don't need update of timestamp!!!!!!
+    } else { 
+      parse->priv->alp_duration_buf_total += duration;
+    }
+  }
+  GST_INFO_OBJECT (parse, "SET alp_buffer_count(%d) alp_duration_buf_total(%"GST_TIME_FORMAT") ", parse->priv->alp_buffer_count, GST_TIME_ARGS(parse->priv->alp_duration_buf_total));
+}
+
+void
+gst_base_parse_set_buffer_size (GstBaseParse * parse, guint32 byte_offset)
+{
+  g_return_if_fail (parse != NULL);
+  parse->priv->alp_size_buf_one = byte_offset;
+  if (parse->priv->offset == 0) {
+    parse->priv->alp_size_buf_total = 0;       //reset for continue next play -if I don't used this, then don't operate 'continue play'
+  }
+  else {
+    if(parse->priv->alp_seek_on) {
+      parse->priv->alp_seek_on = 1;      // don't need update of total buffer size !!!!!! --> need next module
+    } else { 
+      parse->priv->alp_size_buf_total += byte_offset;
+    }
+  }
+  GST_INFO_OBJECT (parse, "SET alp_size_buf_one(%d) alp_size_buf_total(%"G_GUINT64_FORMAT")", parse->priv->alp_size_buf_one, parse->priv->alp_size_buf_total);
+}
+#endif
+
+#ifdef GST_EXT_BASEPARSE_ENABLE_WFD
+void
+gst_base_parse_set_wfd_mode (GstBaseParse * parse, gboolean wfd_mode)
+{
+  g_return_if_fail (parse != NULL);
+  parse->priv->wfd_mode = wfd_mode;
+  if (wfd_mode)
+    GST_INFO_OBJECT (parse, "WFD mode is enabled");
+}
+#endif

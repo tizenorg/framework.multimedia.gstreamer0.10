@@ -2,7 +2,7 @@ helpers_PROGRAMS = gst-plugin-scanner
 helpersdir=$(libexecdir)/gstreamer-$(GST_MAJORMINOR)
 
 gst_plugin_scanner_SOURCES = gst-plugin-scanner.c
-gst_plugin_scanner_CFLAGS = $(GST_OBJ_CFLAGS)
+gst_plugin_scanner_CFLAGS = $(GST_OBJ_CFLAGS) -pie
 gst_plugin_scanner_LDADD = $(GST_OBJ_LIBS)
 
 Android.mk: Makefile.am

@@ -100,8 +100,6 @@
 #include "gst-i18n-lib.h"
 #include "glib-compat-private.h"
 
-#include <mm_ta/mm_ta.h>
-
 /* Element signals and args */
 enum
 {
@@ -2295,12 +2293,9 @@ gst_element_get_state (GstElement * element,
   oclass = GST_ELEMENT_GET_CLASS (element);
 
 	sprintf( szMsg, "gst_element_get_state (%s)", GST_ELEMENT_NAME(element) );
-	MMTA_ACUM_ITEM_BEGIN(szMsg, FALSE );
 
   if (oclass->get_state)
     result = (oclass->get_state) (element, state, pending, timeout);
-
-	MMTA_ACUM_ITEM_END( szMsg, FALSE );
 
   return result;
 }
@@ -2623,14 +2618,11 @@ gst_element_set_state (GstElement * element, GstState state)
   g_return_val_if_fail (GST_IS_ELEMENT (element), GST_STATE_CHANGE_FAILURE);
 
   sprintf(szDebugMsg, "set %s state %s to %s", GST_ELEMENT_NAME (element),  gst_element_state_get_name(GST_STATE (element)), gst_element_state_get_name(state) );
-  MMTA_ACUM_ITEM_BEGIN(szDebugMsg, FALSE);
 
   oclass = GST_ELEMENT_GET_CLASS (element);
 
   if (oclass->set_state)
     result = (oclass->set_state) (element, state);
-
-  MMTA_ACUM_ITEM_END(szDebugMsg, FALSE);
 
   return result;
 }

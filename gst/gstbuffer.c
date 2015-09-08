@@ -127,6 +127,9 @@
 #include "gstutils.h"
 #include "gstminiobject.h"
 #include "gstversion.h"
+#ifdef GST_EXT_AV_RECORDING
+#include "gstvalue.h"
+#endif /* GST_EXT_AV_RECORDING */
 
 struct _GstBufferPrivate
 {
@@ -703,6 +706,34 @@ GstBuffer *
 gst_buffer_make_metadata_writable (GstBuffer * buf)
 {
   GstBuffer *ret;
+#ifdef GST_EXT_AV_RECORDING
+  GstStructure *structure = NULL;
+  guint32 format = 0;
+  GstCaps *buf_caps = gst_buffer_get_caps(buf);
+
+  if (buf_caps) {
+    structure = gst_caps_get_structure(buf_caps, 0);
+    if (structure) {
+      gst_structure_get_fourcc(structure, "format", &format);
+      if (format == GST_MAKE_FOURCC('S', 'R', '3', '2') ||
+          format == GST_MAKE_FOURCC('I', 'T', 'L', 'V') ||
+          format == GST_MAKE_FOURCC('S', '4', '2', '0') ||
+          format == GST_MAKE_FOURCC('S', 'U', 'Y', 'V') ||
+          format == GST_MAKE_FOURCC('S', 'Y', 'V', 'Y') ||
+          format == GST_MAKE_FOURCC('S', 'N', '2', '1') ||
+          format == GST_MAKE_FOURCC('S', 'T', '1', '2') ||
+          format == GST_MAKE_FOURCC('S', 'N', '1', '2') ||
+          format == GST_MAKE_FOURCC('S', 'V', '1', '2')) {
+        GST_CAT_INFO(GST_CAT_BUFFER, "It's zero copy buffer. return itself.");
+        gst_caps_unref(buf_caps);
+        buf_caps = NULL;
+        return buf;
+      }
+    }
+    gst_caps_unref(buf_caps);
+    buf_caps = NULL;
+  }
+#endif /* GST_EXT_AV_RECORDING */
 
   if (gst_buffer_is_metadata_writable (buf)) {
     ret = buf;

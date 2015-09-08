@@ -167,6 +167,9 @@ GstDataQueue * gst_data_queue_new_full       (GstDataQueueCheckFullFunction chec
 
 gboolean       gst_data_queue_push           (GstDataQueue * queue, GstDataQueueItem * item);
 gboolean       gst_data_queue_pop            (GstDataQueue * queue, GstDataQueueItem ** item);
+#ifdef GST_EXT_DATA_QUEUE_MODIFICATION
+gboolean       gst_data_queue_peek           (GstDataQueue * queue, GstDataQueueItem ** item);
+#endif
 
 void           gst_data_queue_flush          (GstDataQueue * queue);
 void           gst_data_queue_set_flushing   (GstDataQueue * queue, gboolean flushing);

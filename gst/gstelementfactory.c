@@ -68,8 +68,6 @@
 
 #include "glib-compat-private.h"
 
-#include <mm_ta/mm_ta.h>
-
 GST_DEBUG_CATEGORY_STATIC (element_factory_debug);
 #define GST_CAT_DEFAULT element_factory_debug
 
@@ -362,9 +360,6 @@ gst_element_factory_create (GstElementFactory * factory, const gchar * name)
 
   g_return_val_if_fail (factory != NULL, NULL);
 
-__ta__(__tafmt__("Creating Element %s(name:%s)", GST_PLUGIN_FEATURE_NAME (factory), name),
-
-
   newfactory =
       GST_ELEMENT_FACTORY (gst_plugin_feature_load (GST_PLUGIN_FEATURE
           (factory)));
@@ -405,8 +400,6 @@ __ta__(__tafmt__("Creating Element %s(name:%s)", GST_PLUGIN_FEATURE_NAME (factor
     gst_object_unref (factory);
 
   GST_DEBUG ("created element \"%s\"", GST_PLUGIN_FEATURE_NAME (factory));
-
-) // __ta__
 
   return element;
 

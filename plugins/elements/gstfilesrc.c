@@ -909,6 +909,27 @@ gst_file_src_query (GstBaseSrc * basesrc, GstQuery * query)
       gst_query_set_uri (query, src->uri);
       ret = TRUE;
       break;
+    case GST_QUERY_CUSTOM: {
+      GstStructure *s;
+      gchar * file_path;
+      s = gst_query_get_structure (query);
+      if (gst_structure_has_name (s, "FileSrcURI")) {
+        gchar *uri;
+        GValue value = { 0 };
+
+        g_value_init (&value, G_TYPE_STRING);
+        file_path = g_strdup_printf ("%s://%s", "file", src->filename);
+        g_value_set_string (&value, file_path);
+
+        GST_INFO_OBJECT (src, "Received supported custom query");
+        gst_structure_set_value (s, "file-uri", &value);
+        ret = TRUE;
+      } else {
+        GST_WARNING_OBJECT (src,"Unsupported query");
+        ret = FALSE;
+      }
+      break;
+    }
     default:
       ret = FALSE;
       break;

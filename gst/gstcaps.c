@@ -432,6 +432,11 @@ gst_caps_unref (GstCaps * caps)
       GST_CAPS_REFCOUNT_VALUE (caps), GST_CAPS_REFCOUNT_VALUE (caps) - 1);
 #endif
 
+  if (GST_CAPS_REFCOUNT_VALUE (caps) > 10000) {
+      GST_WARNING(" refcount = %d \n",GST_CAPS_REFCOUNT_VALUE (caps));
+	  return;
+  }
+
   g_return_if_fail (GST_CAPS_REFCOUNT_VALUE (caps) > 0);
 
   /* if we ended up with the refcount at zero, free the caps */

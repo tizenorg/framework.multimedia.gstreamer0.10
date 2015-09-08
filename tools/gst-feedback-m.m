@@ -5,40 +5,40 @@
 
 command_output ()
 {
-  echo "+++ $1"
+  /bin/echo "+++ $1"
   $1
 }
 
-echo "GStreamer feedback script."
-echo "Please attach the output of this script to your bug reports."
-echo "Bug reports should go into Gnome's bugzilla (http://bugzilla.gnome.org)"
-echo
+/bin/echo "GStreamer feedback script."
+/bin/echo "Please attach the output of this script to your bug reports."
+/bin/echo "Bug reports should go into Gnome's bugzilla (http://bugzilla.gnome.org)"
+/bin/echo
 
-echo "+   SYSTEM INFORMATION"
+/bin/echo "+   SYSTEM INFORMATION"
 command_output "uname -a"
 
 if test -f /etc/redhat-release; then
-  echo "+++  distribution: Red Hat"
-  cat /etc/redhat-release
+  /bin/echo "+++  distribution: Red Hat"
+  /bin/cat /etc/redhat-release
 fi
 
 if test -f /etc/debian_version; then
-  echo "+++  distribution: Debian"
-  cat /etc/debian_version
+  /bin/echo "+++  distribution: Debian"
+  /bin/cat /etc/debian_version
 fi
 
 command_output "cat /etc/issue"
 
-echo
+/bin/echo
 
-echo "+   USER INFORMATION"
+/bin/echo "+   USER INFORMATION"
 command_output "id"
-echo
+/bin/echo
 
-echo "+   PKG-CONFIG INFORMATION"
+/bin/echo "+   PKG-CONFIG INFORMATION"
 for mm in 0.6 0.7 0.8
 do
-  echo "+   $mm"
+  /bin/echo "+   $mm"
   command_output "pkg-config --version"
   command_output "pkg-config gstreamer-$mm --modversion" 2>/dev/null
   command_output "pkg-config gstreamer-$mm --cflags" 2>/dev/null
@@ -46,7 +46,7 @@ do
   command_output "pkg-config gstreamer-libs-$mm --modversion" 2>/dev/null
   command_output "pkg-config gstreamer-libs-$mm --cflags" 2>/dev/null
   command_output "pkg-config gstreamer-libs-$mm --libs" 2>/dev/null
-  echo
+  /bin/echo
 done
 
 for mm in 0.9 0.10
@@ -55,15 +55,15 @@ do
                 gstreamer-dataprotocol gstreamer-plugins-base gstreamer-net\
                 gst-python
   do
-    echo "+   $mm"
+    /bin/echo "+   $mm"
     command_output "pkg-config $module-$mm --modversion" 2>/dev/null
     command_output "pkg-config $module-$mm --cflags" 2>/dev/null
     command_output "pkg-config $module-$mm --libs" 2>/dev/null
-    echo
+    /bin/echo
   done
 done
 
-echo "+   GSTREAMER INFORMATION (unversioned)"
+/bin/echo "+   GSTREAMER INFORMATION (unversioned)"
 command_output "which gst-inspect"
 command_output "gst-inspect"
 command_output "gst-inspect fakesrc"
@@ -71,7 +71,7 @@ command_output "gst-inspect fakesink"
 command_output "gst-launch fakesrc num-buffers=5 ! fakesink"
 for mm in 0.6 0.7 0.8 0.9 0.10
 do
-  echo "+   GSTREAMER INFORMATION ($mm)"
+  /bin/echo "+   GSTREAMER INFORMATION ($mm)"
   command_output "which gst-inspect-$mm"
   command_output "gst-inspect-$mm"
   command_output "gst-inspect-$mm fakesrc"
@@ -79,36 +79,36 @@ do
   command_output "gst-launch-$mm fakesrc num-buffers=5 ! fakesink"
 done
 
-echo "++  looking for gstreamer libraries in common locations"
+/bin/echo "++  looking for gstreamer libraries in common locations"
 for dirs in /usr/lib /usr/local/lib; do
   if test -d $dirs; then
-    find $dirs -name libgstreamer* | grep so
+    /bin/find $dirs -name libgstreamer* | grep so
   fi
 done
 echo "++  looking for gstreamer headers in common locations"
 for dirs in /usr/include /usr/local/include; do
   if test -d $dirs; then
-    find $dirs -name gst.h
+    /bin/find $dirs -name gst.h
   fi
 done
 
-echo "+   GSTREAMER PLUG-INS INFORMATION"
+/bin/echo "+   GSTREAMER PLUG-INS INFORMATION"
 command_output "gst-inspect volume"
 for mm in 0.6 0.7 0.8 0.9 0.10
 do
   command_output "gst-inspect-$mm volume"
 done
 
-echo "++  looking for gstreamer volume plugin in common locations"
+/bin/echo "++  looking for gstreamer volume plugin in common locations"
 for dirs in /usr/lib /usr/local/lib; do
   if test -d $dirs; then
-    find $dirs -name libgstvolume* | grep so
+    /bin/find $dirs -name libgstvolume* | grep so
   fi
 done
 echo "++  looking for gstreamer headers in common locations"
 for dirs in /usr/include /usr/local/include; do
   if test -d $dirs; then
-    find $dirs -name audio.h
+    /bin/find $dirs -name audio.h
   fi
 done
 

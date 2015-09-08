@@ -215,6 +215,14 @@ dladdr (void *address, Dl_info * dl)
 #endif /* __sgi__ */
 #endif
 
+#if defined(USE_DLOG) && defined(GST_EXT_BASIC_MODIFICATION)
+#include <dlog.h>
+
+//#define _SLOG(class, format, arg...) \
+	//(SLOG(class, "GST_LOG" ,"%s:%s(%d)>"format, __MODULE__, __func__, __LINE__, ##arg))
+#endif
+
+
 static void gst_debug_reset_threshold (gpointer category, gpointer unused);
 static void gst_debug_reset_all_thresholds (void);
 
@@ -974,12 +982,23 @@ gst_debug_log_default (GstDebugCategory * category, GstDebugLevel level,
     levelcolor = levelcolormap[level];
 
 #define PRINT_FMT " %s"PID_FMT"%s "PTR_FMT" %s%s%s %s"CAT_FMT"%s %s\n"
+
+#if defined(USE_DLOG) && defined(GST_EXT_BASIC_MODIFICATION)
+    SLOG(LOG_WARN, "GST_LOG",
+	 "%" GST_TIME_FORMAT PRINT_FMT, GST_TIME_ARGS (elapsed),
+	 pidcolor, pid, clear, g_thread_self (), levelcolor,
+	 gst_debug_level_get_name (level), clear, color,
+	 gst_debug_category_get_name (category), file, line, function, obj,
+	 clear, gst_debug_message_get (message));
+#else
     fprintf (log_file, "%" GST_TIME_FORMAT PRINT_FMT, GST_TIME_ARGS (elapsed),
         pidcolor, pid, clear, g_thread_self (), levelcolor,
         gst_debug_level_get_name (level), clear, color,
         gst_debug_category_get_name (category), file, line, function, obj,
         clear, gst_debug_message_get (message));
     fflush (log_file);
+#endif
+
 #undef PRINT_FMT
     g_free (color);
 #else
@@ -988,6 +1007,7 @@ gst_debug_log_default (GstDebugCategory * category, GstDebugLevel level,
      * thing. */
     static GStaticMutex win_print_mutex = G_STATIC_MUTEX_INIT;
     const gint clear = FOREGROUND_RED | FOREGROUND_GREEN | FOREGROUND_BLUE;
+
 #define SET_COLOR(c) G_STMT_START { \
   if (log_file == stderr) \
     SetConsoleTextAttribute (GetStdHandle (STD_ERROR_HANDLE), (c)); \
@@ -1023,11 +1043,22 @@ gst_debug_log_default (GstDebugCategory * category, GstDebugLevel level,
   } else {
     /* no color, all platforms */
 #define PRINT_FMT " "PID_FMT" "PTR_FMT" %s "CAT_FMT" %s\n"
+
+    /* Tizen doesn't care about Win32 */
+#if defined(USG_DLOG) && defined(GST_EXT_BASIC_MODIFICATION) && !defined(G_OS_WIN32)
+      SLOG(LOG_WARN, "GST_LOG",
+        "%" GST_TIME_FORMAT PRINT_FMT, GST_TIME_ARGS (elapsed),
+        pid, g_thread_self (), gst_debug_level_get_name (level),
+        gst_debug_category_get_name (category), file, line, function, obj,
+        gst_debug_message_get (message));
+#else
     fprintf (log_file, "%" GST_TIME_FORMAT PRINT_FMT, GST_TIME_ARGS (elapsed),
         pid, g_thread_self (), gst_debug_level_get_name (level),
         gst_debug_category_get_name (category), file, line, function, obj,
         gst_debug_message_get (message));
     fflush (log_file);
+#endif
+
 #undef PRINT_FMT
   }
 

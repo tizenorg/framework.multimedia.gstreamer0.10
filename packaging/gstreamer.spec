@@ -1,15 +1,16 @@
 Name:       gstreamer
 Summary:    GStreamer streaming media framework runtime
-Version:    0.10.36
-Release:    2
+Version:    0.10.37
+Release:    44
 Group:      Applications/Multimedia
-License:    LGPLv2+
+License:    LGPL-2.0+
 Source0:    %{name}-%{version}.tar.gz
+Source1:    gstreamer-registry.service
 Requires(post): /sbin/ldconfig
 Requires(postun): /sbin/ldconfig
 BuildRequires:  pkgconfig(glib-2.0)
 BuildRequires:  pkgconfig(libxml-2.0)
-BuildRequires:  pkgconfig(mm-ta)
+BuildRequires:  pkgconfig(dlog)
 BuildRequires:  bison
 BuildRequires:  flex
 
@@ -54,11 +55,18 @@ with different major/minor versions of GStreamer.
 %build
 
 
+./autogen.sh --noconfigure
+
 export CFLAGS+=" -Wall -g -fPIC\
  -DGST_EXT_AV_RECORDING\
  -DGST_EXT_QUEUE_ENHANCEMENT\
+ -DGST_EXT_MQ_MODIFICATION\
  -DGST_EXT_CURRENT_BYTES\
- -DGST_EXT_MODIFIED_DQBUF"
+ -DGST_EXT_BASEPARSER_MODIFICATION\
+ -DGST_EXT_BASIC_MODIFICATION\
+ -D_VSP_SPEED_\
+ -DGST_EXT_DATA_QUEUE_MODIFICATION\
+ -DGST_EXT_BASEPARSE_ENABLE_WFD"
 
 %configure --prefix=/usr\
  --disable-valgrind\
@@ -76,12 +84,21 @@ export CFLAGS+=" -Wall -g -fPIC\
  --disable-gtk-doc\
  --disable-registry-update\
  --disable-loadsave\
- --with-html-dir=/tmp/dump
+ --with-html-dir=/tmp/dump\
+ --enable-dlog
+
+make -v
 
 make %{?jobs:-j%jobs}
 
 %install
 rm -rf %{buildroot}
+mkdir -p %{buildroot}/usr/share/license
+cp COPYING %{buildroot}/usr/share/license/%{name}
+mkdir -p %{buildroot}%{_libdir}/systemd/system
+install -m 644 %{SOURCE1} %{buildroot}%{_libdir}/systemd/system/gstreamer-registry.service
+mkdir -p  %{buildroot}%{_libdir}/systemd/system/multi-user.target.wants
+ln -s  ../gstreamer-registry.service  %{buildroot}%{_libdir}/systemd/system/multi-user.target.wants/gstreamer-registry.service
 %make_install
 
 rm -rf %{buildroot}/tmp/dump
@@ -102,6 +119,7 @@ rm -rf %{buildroot}/tmp/dump
 
 
 %files
+%manifest gstreamer.manifest
 %defattr(-,root,root,-)
 %doc AUTHORS COPYING NEWS README RELEASE TODO
 %{_libdir}/libgstreamer-0.10.so.*
@@ -125,7 +143,9 @@ rm -rf %{buildroot}/tmp/dump
 %doc %{_mandir}/man1/gst-launch-0.10.*
 %doc %{_mandir}/man1/gst-typefind-0.10.*
 %doc %{_mandir}/man1/gst-xmlinspect-0.10.*
-
+/usr/share/license/%{name}
+%{_libdir}/systemd/system/gstreamer-registry.service
+%{_libdir}/systemd/system/multi-user.target.wants/gstreamer-registry.service
 
 %files devel
 %defattr(-,root,root,-)
@@ -152,6 +172,7 @@ rm -rf %{buildroot}/tmp/dump
 %{_libdir}/pkgconfig/gstreamer-net-0.10.pc
 
 %files tools
+%manifest gstreamer-tools.manifest
 %defattr(-,root,root,-)
 %{_bindir}/gst-feedback
 %{_bindir}/gst-inspect

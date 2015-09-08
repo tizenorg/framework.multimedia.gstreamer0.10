@@ -80,9 +80,18 @@ struct _GstSystemClockClass {
   gpointer _gst_reserved[GST_PADDING];
 };
 
-GType                   gst_system_clock_get_type       (void);
+GType		gst_system_clock_get_type       (void);
 
-GstClock*               gst_system_clock_obtain         (void);
+GstClock*	gst_system_clock_obtain         (void);
+
+
+typedef void (*wait_jitter_adjust_func)(GstClock *clock, gpointer user_data);
+
+void		gst_system_clock_wait_adjust(GstClock *clock,
+			wait_jitter_adjust_func wait_jitter_adjust, gpointer user_data);
+
+void		gst_system_clock_wait_revert(GstClock *clock,
+			wait_jitter_adjust_func wait_jitter_revert, gpointer user_data);
 
 G_END_DECLS
 

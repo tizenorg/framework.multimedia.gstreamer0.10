@@ -128,7 +128,12 @@ libgstreamer_@GST_MAJORMINOR@_la_CFLAGS =		\
 	-DGST_MAJORMINOR=\""$(GST_MAJORMINOR)"\" 	\
 	-DGST_DISABLE_DEPRECATED			\
 	$(VALGRIND_CFLAGS)				\
+	$(DLOG_CFLAGS)		\
 	$(GST_ALL_CFLAGS)
+
+if USE_DLOG
+libgstreamer_@GST_MAJORMINOR@_la_CFLAGS += -DUSE_DLOG
+endif
 
 libgstreamer_@GST_MAJORMINOR@_la_LIBADD =		\
 	$(GST_PARSE_LA)					\
@@ -136,7 +141,7 @@ libgstreamer_@GST_MAJORMINOR@_la_LIBADD =		\
 	$(WIN32_LIBS)					\
 	$(XML_LIBS)					\
 	$(LIBM)						\
-	-lmm_ta
+	$(DLOG_LIBS)				
 
 libgstreamer_@GST_MAJORMINOR@_la_LDFLAGS =		\
 	$(GST_LIB_LDFLAGS) $(GST_ALL_LDFLAGS) $(GST_LT_LDFLAGS)

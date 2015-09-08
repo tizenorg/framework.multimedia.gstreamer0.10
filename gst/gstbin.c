@@ -2802,13 +2802,26 @@ bin_push_state_continue (BinContinueData * data)
 {
   GstBinClass *klass;
   GstBin *bin;
+#ifdef GST_EXT_BASIC_MODIFICATION
+  int ret = 0;
+  GError *error = NULL;
+#endif /* GST_EXT_BASIC_MODIFICATION */
 
   /* ref was taken */
   bin = data->bin;
   klass = GST_BIN_GET_CLASS (bin);
 
   GST_DEBUG_OBJECT (bin, "pushing continue on thread pool");
+#ifdef GST_EXT_BASIC_MODIFICATION
+  ret = g_thread_pool_push (klass->pool, data, &error);
+  GST_DEBUG_OBJECT (bin, "g_thread_pool_push ret %d", ret);
+  if (!ret && error) {
+    GST_ERROR_OBJECT (bin, "error message %s", error->message);
+    g_error_free(error);
+  }
+#else /* GST_EXT_BASIC_MODIFICATION */
   g_thread_pool_push (klass->pool, data, NULL);
+#endif /* GST_EXT_BASIC_MODIFICATION */
 }
 
 /* an element started an async state change, if we were not busy with a state

@@ -66,6 +66,10 @@
 #include <unistd.h>
 #endif
 
+#ifdef GST_EXT_AV_RECORDING
+#include <fcntl.h>              /* for posix_fadvise */
+#endif /* GST_EXT_AV_RECORDING */
+
 static GstStaticPadTemplate sinktemplate = GST_STATIC_PAD_TEMPLATE ("sink",
     GST_PAD_SINK,
     GST_PAD_ALWAYS,
@@ -607,8 +611,14 @@ gst_file_sink_event (GstBaseSink * sink, GstEvent * event)
       break;
     }
     case GST_EVENT_EOS:
+#ifdef GST_EXT_AV_RECORDING
+      GST_WARNING_OBJECT(filesink, "GST_EVENT_EOS received");
+#endif /* GST_EXT_AV_RECORDING */
       if (fflush (filesink->file))
         goto flush_failed;
+#ifdef GST_EXT_AV_RECORDING
+      GST_WARNING_OBJECT(filesink, "fflush done");
+#endif /* GST_EXT_AV_RECORDING */
       break;
     default:
       break;
@@ -662,6 +672,9 @@ gst_file_sink_render (GstBaseSink * sink, GstBuffer * buffer)
   GstFileSink *filesink;
   guint size;
   guint8 *data;
+#ifdef GST_EXT_AV_RECORDING
+  int ret = 0;
+#endif /* GST_EXT_AV_RECORDING */
 
   filesink = GST_FILE_SINK (sink);
 
@@ -676,6 +689,12 @@ gst_file_sink_render (GstBaseSink * sink, GstBuffer * buffer)
       goto handle_error;
 
     filesink->current_pos += size;
+#ifdef GST_EXT_AV_RECORDING
+    ret = posix_fadvise(fileno((FILE *)filesink->file), 0, 0, POSIX_FADV_DONTNEED);
+    if (ret) {
+      GST_WARNING_OBJECT(filesink, "posix_fadvise failed : ret %x", ret);
+    }
+#endif /* GST_EXT_AV_RECORDING */
   }
 
   return GST_FLOW_OK;

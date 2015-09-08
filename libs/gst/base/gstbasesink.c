@@ -154,6 +154,7 @@
 #include "gstbasesink.h"
 #include <gst/gstmarshal.h>
 #include <gst/gst-i18n-lib.h>
+#include <gst/gstsystemclock.h>
 
 GST_DEBUG_CATEGORY_STATIC (gst_base_sink_debug);
 #define GST_CAT_DEFAULT gst_base_sink_debug
@@ -271,7 +272,59 @@ struct _GstBaseSinkPrivate
   /* for throttling and QoS */
   GstClockTime earliest_in_time;
   GstClockTime throttle_time;
+
+#ifdef _VSP_SPEED_
+  /* parameters using by vsp */
+  gboolean	vsp_enabled;
+  gdouble	vsp_speed;
+  /* similar as segment.start */
+  gint64	vsp_position;
+  /* store orignal segment.stop */
+  gint64	vsp_stop;
+  gint64	vsp_last_position;
+  /* similiar as base_time */
+  gint64	vsp_last_rtime;
+  /* basesink act as parent of videosink */
+  gboolean	vsp_video;
+#endif
+
+  /* clock calibration */
+
+  gboolean	cc_enabled;
+  struct {
+    gboolean		is_video_sink;
+    /* if it is prepared to do calibration */
+    gboolean		do_clock_calibration;
+    GstClockTime	last_expecting_render;
+    GstClockTime	cur_expecting_render;
+    GstClockTime	last_actually_render;
+    GstClockTime	cur_actually_render;
+    /* the threshold determine whether to do cc */
+    GstClockTimeDiff	cc_threshold;
+    /* the adjustment */
+    GstClockTimeDiff	cc_time;
+    /* the accumulation of cc */
+    GstClockTimeDiff	cc_accumulation;
+    /* cc_stat temporarily */
+    guint		cc_stats[10];
+  }CC;
 };
+
+/* Fake clock type to simulate audioclock */
+typedef GstClockTime (*GstFakeFunc) (GstClock *clock, gpointer user_data);
+typedef struct {
+	GstSystemClock clock;
+	GstFakeFunc fake_func;
+	gpointer fake_data;
+}GstFakeClock;
+
+typedef struct {
+	GstFakeFunc old_fake_func;
+	gpointer old_fake_data;
+	GstFakeFunc new_fake_func;
+	gpointer new_fake_data;
+}GstFakeData;
+
 
 #define DO_RUNNING_AVG(avg,val,size) (((val) + ((size)-1) * (avg)) / (size))
 
@@ -313,6 +366,14 @@ enum
 #define DEFAULT_ENABLE_LAST_BUFFER  TRUE
 #define DEFAULT_THROTTLE_TIME       0
 
+#ifdef _VSP_SPEED_
+#define DEFAULT_VSP_SPEED       1.0f
+#endif
+
+#define DEFAULT_CC_TIME    	(10 * GST_MSECOND)
+#define DEFAULT_CC_THRESHOLD	(1 * GST_MSECOND)
+#define DEFAULT_ENABLE_CC	TRUE
+
 enum
 {
   PROP_0,
@@ -327,6 +388,8 @@ enum
   PROP_BLOCKSIZE,
   PROP_RENDER_DELAY,
   PROP_THROTTLE_TIME,
+  /* enable cc feature or not */
+  PROP_ENABLE_CC,
   PROP_LAST
 };
 
@@ -417,6 +480,27 @@ static gboolean gst_base_sink_is_too_late (GstBaseSink * basesink,
     GstClockReturn status, GstClockTimeDiff jitter);
 static GstFlowReturn gst_base_sink_preroll_object (GstBaseSink * basesink,
     guint8 obj_type, GstMiniObject * obj);
+
+/* CC use */
+static void
+basesink_cc_initialize(GstBaseSink *basesink);
+static void
+basesink_cc_uninitialize(GstBaseSink *basesink);
+static void
+basesink_cc_is_video_sink(GstBaseSink *basesink, gboolean is_video_sink);
+static void
+basesink_cc_do_clock_calibration(GstBaseSink *basesink, gboolean do_or_not);
+static GstClockTime
+basesink_cc_fake_clock_func(GstClock *clock, gpointer user_data);
+static void
+basesink_cc_wait_jitter_adjust(GstClock *clock, gpointer user_data);
+static void
+basesink_cc_wait_jitter_revert(GstClock *clock, gpointer user_data);
+static GstClockReturn
+basesink_cc_wait_calibrated_clock (GstBaseSink *sink, GstClockTime time, GstClockTimeDiff *jitter);
+static GstClockReturn
+basesink_cc_clock_calibration_wait (GstBaseSink *basesink, GstClockID id, GstClockTimeDiff *jitter);
+
 
 static void
 gst_base_sink_class_init (GstBaseSinkClass * klass)
@@ -554,6 +638,11 @@ gst_base_sink_class_init (GstBaseSinkClass * klass)
       g_param_spec_uint64 ("throttle-time", "Throttle time",
           "The time to keep between rendered buffers (unused)", 0, G_MAXUINT64,
           DEFAULT_THROTTLE_TIME, G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
+
+  g_object_class_install_property (gobject_class, PROP_ENABLE_CC,
+      g_param_spec_boolean ("enable-cc", "Enable Clock Calibration",
+          "Enable the cc property", DEFAULT_ENABLE_CC,
+          G_PARAM_READWRITE | G_PARAM_STATIC_STRINGS));
 
   gstelement_class->change_state =
       GST_DEBUG_FUNCPTR (gst_base_sink_change_state);
@@ -725,6 +814,18 @@ gst_base_sink_init (GstBaseSink * basesink, gpointer g_class)
   priv->cached_clock_id = NULL;
   g_atomic_int_set (&priv->enable_last_buffer, DEFAULT_ENABLE_LAST_BUFFER);
   priv->throttle_time = DEFAULT_THROTTLE_TIME;
+  priv->cc_enabled = DEFAULT_ENABLE_CC;
+
+#ifdef _VSP_SPEED_
+	/* vsp default */
+	priv->vsp_enabled = FALSE;
+	priv->vsp_speed = DEFAULT_VSP_SPEED;
+	priv->vsp_position = 0;
+	priv->vsp_stop = -1;
+	priv->vsp_last_position = 0;
+	priv->vsp_last_rtime = 0;
+	priv->vsp_video = FALSE;
+#endif
 
   GST_OBJECT_FLAG_SET (basesink, GST_ELEMENT_IS_SINK);
 }
@@ -1366,6 +1467,26 @@ gst_base_sink_get_throttle_time (GstBaseSink * sink)
   return res;
 }
 
+gboolean
+gst_base_sink_is_cc_enabled(GstBaseSink * sink)
+{
+  gboolean res;
+
+  g_return_val_if_fail (GST_IS_BASE_SINK (sink), FALSE);
+
+  res = g_atomic_int_get (&sink->priv->cc_enabled);
+  return res;
+}
+
+void
+gst_base_sink_set_cc_enabled (GstBaseSink * sink, gboolean enabled)
+{
+  g_return_if_fail (GST_IS_BASE_SINK (sink));
+
+  g_atomic_int_set (&sink->priv->cc_enabled, enabled);
+}
+
+
 static void
 gst_base_sink_set_property (GObject * object, guint prop_id,
     const GValue * value, GParamSpec * pspec)
@@ -1405,6 +1526,9 @@ gst_base_sink_set_property (GObject * object, guint prop_id,
       break;
     case PROP_THROTTLE_TIME:
       gst_base_sink_set_throttle_time (sink, g_value_get_uint64 (value));
+      break;
+    case PROP_ENABLE_CC:
+      gst_base_sink_set_cc_enabled(sink, g_value_get_boolean (value));
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -1451,6 +1575,9 @@ gst_base_sink_get_property (GObject * object, guint prop_id, GValue * value,
       break;
     case PROP_THROTTLE_TIME:
       g_value_set_uint64 (value, gst_base_sink_get_throttle_time (sink));
+      break;
+    case PROP_ENABLE_CC:
+      g_value_set_boolean(value, gst_base_sink_is_cc_enabled (sink));
       break;
     default:
       G_OBJECT_WARN_INVALID_PROPERTY_ID (object, prop_id, pspec);
@@ -1530,6 +1657,25 @@ gst_base_sink_configure_segment (GstBaseSink * basesink, GstPad * pad,
    * We protect with the OBJECT_LOCK so that we can use the values to
    * safely answer a POSITION query. */
   GST_OBJECT_LOCK (basesink);
+
+#ifdef _VSP_SPEED_
+	/* update segment according to video/audio */
+	if(basesink->priv->vsp_enabled) {
+
+		if(basesink->priv->vsp_video) {
+
+			rate = basesink->priv->vsp_speed;
+
+		} else {
+
+			basesink->priv->vsp_stop = stop;
+			if(stop != -1) {
+				stop = start + (stop - start) / basesink->priv->vsp_speed;
+			}
+		}
+	}
+#endif
+
   gst_segment_set_newsegment_full (segment, update, rate, arate, format, start,
       stop, time);
 
@@ -2144,6 +2290,179 @@ gst_base_sink_adjust_time (GstBaseSink * basesink, GstClockTime time)
   return time;
 }
 
+static void
+basesink_cc_initialize(GstBaseSink *basesink)
+{
+	GstBaseSinkPrivate *priv;
+
+	GST_OBJECT_LOCK(basesink);
+
+#define SYSCLK_RESET(priv); \
+	priv = basesink->priv; \
+	priv->CC.is_video_sink = FALSE; \
+	priv->CC.do_clock_calibration = FALSE; \
+	priv->CC.last_expecting_render = 0; \
+	priv->CC.cur_expecting_render = 0; \
+	priv->CC.last_actually_render = 0; \
+	priv->CC.cur_actually_render = 0; \
+	priv->CC.cc_threshold = DEFAULT_CC_THRESHOLD; \
+	priv->CC.cc_time = DEFAULT_CC_TIME; \
+	priv->CC.cc_accumulation = 0; \
+	for(int i = 0; i < 10; ++i) priv->CC.cc_stats[i] = 0; \
+	priv->start = GST_CLOCK_TIME_NONE;
+
+	SYSCLK_RESET(priv);
+
+	GST_OBJECT_UNLOCK(basesink);
+}
+
+static void
+basesink_cc_uninitialize(GstBaseSink *basesink)
+{
+	GstBaseSinkPrivate *priv;
+	GST_OBJECT_LOCK(basesink);
+
+	SYSCLK_RESET(priv);
+
+	GST_OBJECT_UNLOCK(basesink);
+}
+
+static void
+basesink_cc_is_video_sink(GstBaseSink *basesink, gboolean is_video_sink)
+{
+	GST_OBJECT_LOCK(basesink);
+	basesink->priv->CC.is_video_sink = is_video_sink;
+	GST_OBJECT_UNLOCK(basesink);
+}
+
+static void
+basesink_cc_do_clock_calibration(GstBaseSink *basesink, gboolean do_or_not)
+{
+	GST_OBJECT_LOCK(basesink);
+	basesink->priv->CC.do_clock_calibration = do_or_not;
+	GST_OBJECT_UNLOCK(basesink);
+}
+
+static GstClockTime
+basesink_cc_fake_clock_func(GstClock *clock, gpointer user_data)
+{
+	GstClockTime result, a_result, s_result;
+	GstFakeData *p_fake_data;
+	GstBaseSink *basesink;
+	GstBaseSinkPrivate *priv;
+	GstClockTime expecting_actually_render;
+	GstClockTimeDiff jitter, expecting_jitter;
+
+	p_fake_data = (GstFakeData *)user_data;
+	basesink = (GstBaseSink *)p_fake_data->new_fake_data;
+	priv = basesink->priv;
+
+	a_result = p_fake_data->old_fake_func(clock,p_fake_data->old_fake_data);
+
+	/* check if need do CC */
+	if(!priv->CC.do_clock_calibration) {
+		result = a_result;
+		goto done;
+	}
+
+	expecting_actually_render = priv->CC.last_actually_render
+		+ priv->CC.cur_expecting_render - priv->CC.last_expecting_render;
+	s_result = gst_util_get_timestamp();
+
+	/* we hope to wait the value of expecting_jitter */
+	expecting_jitter = expecting_actually_render - s_result;
+	/* while if a_result , we will wait the value of jitter */
+	jitter = priv->CC.cur_expecting_render - a_result;
+
+	if(expecting_actually_render <= s_result) {
+		result = priv->CC.cur_expecting_render;
+		GST_LOG("we are late , render ASAP");
+		goto done;
+	}
+
+	/* audioclock flushes , handle this to avoid discard frame */
+	/*
+	if(jitter < 0) {
+		result = priv->CC.cur_expecting_render - priv->CC.cc_time;
+		GST_LOG("audio clock flush");
+		goto done;
+	}
+	*/
+
+	/* do real clock calibration using cc_time */
+	if(jitter - expecting_jitter < priv->CC.cc_time
+		&& jitter - expecting_jitter > - priv->CC.cc_time) {
+
+		/* adjust jitter to expecting_jitter */
+		result = priv->CC.cur_expecting_render - expecting_jitter;
+	} else if(jitter - expecting_jitter > priv->CC.cc_time) {
+
+		result = a_result + priv->CC.cc_time;
+	} else
+		result = a_result - priv->CC.cc_time;
+
+	GST_LOG("jitter=%"GST_TIME_FORMAT",expecting_jitter=%"GST_TIME_FORMAT",new jitter=%"GST_TIME_FORMAT,
+		GST_TIME_ARGS(jitter),
+		GST_TIME_ARGS(expecting_jitter),
+		GST_TIME_ARGS(priv->CC.cur_expecting_render - result));
+done:
+	priv->CC.cc_accumulation += (result - a_result);
+	return result;
+}
+
+static void
+basesink_cc_wait_jitter_adjust(GstClock *clock, gpointer user_data)
+{
+	GstFakeClock *p_fake_clock;
+	GstFakeData *p_fake_data;
+	p_fake_clock = (GstFakeClock *)clock;
+	p_fake_data = (GstFakeData *)user_data;
+	p_fake_clock->fake_func = p_fake_data->new_fake_func;
+	p_fake_clock->fake_data = p_fake_data;
+}
+
+static void
+basesink_cc_wait_jitter_revert(GstClock *clock, gpointer user_data)
+{
+	GstFakeClock *p_fake_clock;
+	GstFakeData *p_fake_data;
+	p_fake_clock = (GstFakeClock *)clock;
+	p_fake_data = (GstFakeData *)user_data;
+	p_fake_clock->fake_func = p_fake_data->old_fake_func;
+	p_fake_clock->fake_data = p_fake_data->old_fake_data;
+
+	/* revert to default */
+	gst_system_clock_wait_adjust(clock, NULL, NULL);
+	gst_system_clock_wait_revert(clock, NULL, NULL);
+}
+
+
+static GstClockReturn
+basesink_cc_clock_calibration_wait (GstBaseSink *basesink, GstClockID id, GstClockTimeDiff *jitter)
+{
+	GstClock *clock;
+	/* local visible , global effective */
+	static GstFakeData fake_data = {0,};
+	GstFakeClock *p_fake_clock;
+	GstClockReturn result;
+
+	g_return_val_if_fail (id != NULL, GST_CLOCK_ERROR);
+
+	clock = GST_CLOCK_ENTRY_CLOCK ((GstClockEntry *) id);
+
+	p_fake_clock = (GstFakeClock *)clock;
+
+	fake_data.old_fake_func = p_fake_clock->fake_func;
+	fake_data.old_fake_data = p_fake_clock->fake_data;
+	fake_data.new_fake_func = basesink_cc_fake_clock_func;
+	fake_data.new_fake_data = basesink;
+
+	gst_system_clock_wait_adjust(clock, basesink_cc_wait_jitter_adjust, &fake_data);
+	gst_system_clock_wait_revert(clock, basesink_cc_wait_jitter_revert, &fake_data);
+
+	return gst_clock_id_wait(id, jitter);
+}
+
 /**
  * gst_base_sink_wait_clock:
  * @sink: the sink
@@ -2174,79 +2493,146 @@ GstClockReturn
 gst_base_sink_wait_clock (GstBaseSink * sink, GstClockTime time,
     GstClockTimeDiff * jitter)
 {
-  GstClockReturn ret;
-  GstClock *clock;
-  GstClockTime base_time;
-
-  if (G_UNLIKELY (!GST_CLOCK_TIME_IS_VALID (time)))
-    goto invalid_time;
-
-  GST_OBJECT_LOCK (sink);
-  if (G_UNLIKELY (!sink->sync))
-    goto no_sync;
-
-  if (G_UNLIKELY ((clock = GST_ELEMENT_CLOCK (sink)) == NULL))
-    goto no_clock;
-
-  base_time = GST_ELEMENT_CAST (sink)->base_time;
-  GST_LOG_OBJECT (sink,
-      "time %" GST_TIME_FORMAT ", base_time %" GST_TIME_FORMAT,
-      GST_TIME_ARGS (time), GST_TIME_ARGS (base_time));
-
-  /* add base_time to running_time to get the time against the clock */
-  time += base_time;
-
-  /* Re-use existing clockid if available */
-  /* FIXME: Casting to GstClockEntry only works because the types
-   * are the same */
-  if (G_LIKELY (sink->priv->cached_clock_id != NULL
-          && GST_CLOCK_ENTRY_CLOCK ((GstClockEntry *) sink->priv->
-              cached_clock_id) == clock)) {
-    if (!gst_clock_single_shot_id_reinit (clock, sink->priv->cached_clock_id,
-            time)) {
-      gst_clock_id_unref (sink->priv->cached_clock_id);
-      sink->priv->cached_clock_id = gst_clock_new_single_shot_id (clock, time);
-    }
-  } else {
-    if (sink->priv->cached_clock_id != NULL)
-      gst_clock_id_unref (sink->priv->cached_clock_id);
-    sink->priv->cached_clock_id = gst_clock_new_single_shot_id (clock, time);
-  }
-  GST_OBJECT_UNLOCK (sink);
-
-  /* A blocking wait is performed on the clock. We save the ClockID
-   * so we can unlock the entry at any time. While we are blocking, we
-   * release the PREROLL_LOCK so that other threads can interrupt the
-   * entry. */
-  sink->clock_id = sink->priv->cached_clock_id;
-  /* release the preroll lock while waiting */
+#define GST_BASE_SINK_WAIT_CLOCK_BEGIN \
+  GstClockReturn ret; \
+  GstClock *clock; \
+  GstClockTime base_time; \
+ \
+  if (G_UNLIKELY (!GST_CLOCK_TIME_IS_VALID (time))) \
+    goto invalid_time; \
+ \
+  GST_OBJECT_LOCK (sink); \
+  if (G_UNLIKELY (!sink->sync)) \
+    goto no_sync; \
+ \
+  if (G_UNLIKELY ((clock = GST_ELEMENT_CLOCK (sink)) == NULL)) \
+    goto no_clock; \
+ \
+  base_time = GST_ELEMENT_CAST (sink)->base_time; \
+  GST_LOG_OBJECT (sink, \
+      "time %" GST_TIME_FORMAT ", base_time %" GST_TIME_FORMAT, \
+      GST_TIME_ARGS (time), GST_TIME_ARGS (base_time)); \
+ \
+  /* add base_time to running_time to get the time against the clock */ \
+  time += base_time; \
+ \
+  /* Re-use existing clockid if available */ \
+  /* FIXME: Casting to GstClockEntry only works because the types \
+   * are the same */ \
+  if (G_LIKELY (sink->priv->cached_clock_id != NULL \
+          && GST_CLOCK_ENTRY_CLOCK ((GstClockEntry *) sink->priv-> \
+              cached_clock_id) == clock)) { \
+    if (!gst_clock_single_shot_id_reinit (clock, sink->priv->cached_clock_id, \
+            time)) { \
+      gst_clock_id_unref (sink->priv->cached_clock_id); \
+      sink->priv->cached_clock_id = gst_clock_new_single_shot_id (clock, time); \
+    } \
+  } else { \
+    if (sink->priv->cached_clock_id != NULL) \
+      gst_clock_id_unref (sink->priv->cached_clock_id); \
+    sink->priv->cached_clock_id = gst_clock_new_single_shot_id (clock, time); \
+  } \
+  GST_OBJECT_UNLOCK (sink); \
+ \
+  /* A blocking wait is performed on the clock. We save the ClockID \
+   * so we can unlock the entry at any time. While we are blocking, we \
+   * release the PREROLL_LOCK so that other threads can interrupt the \
+   * entry. */ \
+  sink->clock_id = sink->priv->cached_clock_id; \
+  /* release the preroll lock while waiting */ \
   GST_PAD_PREROLL_UNLOCK (sink->sinkpad);
 
+  GST_BASE_SINK_WAIT_CLOCK_BEGIN
   ret = gst_clock_id_wait (sink->priv->cached_clock_id, jitter);
 
-  GST_PAD_PREROLL_LOCK (sink->sinkpad);
-  sink->clock_id = NULL;
+#define GST_BASE_SINK_WAIT_CLOCK_END \
+  GST_PAD_PREROLL_LOCK (sink->sinkpad); \
+  sink->clock_id = NULL; \
+ \
+  return ret; \
+ \
+  /* no syncing needed */ \
+invalid_time: \
+  { \
+    GST_DEBUG_OBJECT (sink, "time not valid, no sync needed"); \
+    return GST_CLOCK_BADTIME; \
+  } \
+no_sync: \
+  { \
+    GST_DEBUG_OBJECT (sink, "sync disabled"); \
+    GST_OBJECT_UNLOCK (sink); \
+    return GST_CLOCK_BADTIME; \
+  } \
+no_clock: \
+  { \
+    GST_DEBUG_OBJECT (sink, "no clock, can't sync"); \
+    GST_OBJECT_UNLOCK (sink); \
+    return GST_CLOCK_BADTIME; \
+  }
 
-  return ret;
+  GST_BASE_SINK_WAIT_CLOCK_END
+}
 
-  /* no syncing needed */
-invalid_time:
-  {
-    GST_DEBUG_OBJECT (sink, "time not valid, no sync needed");
-    return GST_CLOCK_BADTIME;
-  }
-no_sync:
-  {
-    GST_DEBUG_OBJECT (sink, "sync disabled");
-    GST_OBJECT_UNLOCK (sink);
-    return GST_CLOCK_BADTIME;
-  }
-no_clock:
-  {
-    GST_DEBUG_OBJECT (sink, "no clock, can't sync");
-    GST_OBJECT_UNLOCK (sink);
-    return GST_CLOCK_BADTIME;
-  }
+GstClockReturn
+basesink_cc_wait_calibrated_clock (GstBaseSink *sink, GstClockTime time,
+    GstClockTimeDiff *jitter)
+{
+/* instance must be subclass of type . return TRUE on success
+no depends on GST_BASE_LIBS (no call GST_IS_AUDIO_CLOCK(clock)) */
+#define _G_TYPE_MUST_BE_SUB(instance, type) ({ \
+		GTypeInstance *__inst;__inst = (GTypeInstance*) instance; \
+		GType __t;__t = type; \
+		gboolean __r; \
+		if(!__inst || !__inst->g_class) \
+			__r = FALSE; \
+		else if( (__inst->g_class->g_type != __t) \
+			&& g_type_check_instance_is_a (__inst, __t)) \
+				__r = TRUE; \
+		else \
+			__r = FALSE; \
+		__r; \
+		})
+
+	GstClockTimeDiff expecting_interval, actually_interval;
+
+	GST_BASE_SINK_WAIT_CLOCK_BEGIN
+
+	if(sink->priv->CC.is_video_sink
+		&& _G_TYPE_MUST_BE_SUB(clock, GST_TYPE_SYSTEM_CLOCK)) {
+
+		GST_OBJECT_LOCK(sink);
+		sink->priv->CC.cur_expecting_render = time;
+		sink->priv->CC.last_actually_render = sink->priv->CC.cur_actually_render;
+		GST_OBJECT_UNLOCK(sink);
+
+		expecting_interval = sink->priv->CC.cur_expecting_render
+					- sink->priv->CC.last_expecting_render;
+
+		ret = basesink_cc_clock_calibration_wait(sink, sink->priv->cached_clock_id, jitter);
+
+		GST_OBJECT_LOCK(sink);
+		sink->priv->CC.last_expecting_render = time;
+		sink->priv->CC.cur_actually_render = gst_util_get_timestamp();
+		GST_OBJECT_UNLOCK(sink);
+
+		actually_interval = sink->priv->CC.cur_actually_render
+					- sink->priv->CC.last_actually_render;
+
+		/* cosume speed smaller than cc_threshold , consider it is proper timing to do cc */
+		if(!sink->priv->CC.do_clock_calibration) {
+			if(actually_interval - expecting_interval < sink->priv->CC.cc_threshold
+				&& actually_interval - expecting_interval > -sink->priv->CC.cc_threshold)
+			{
+				GST_WARNING("Timing to do CC");
+				basesink_cc_do_clock_calibration(sink, TRUE);
+			}
+		}
+
+	}
+	else
+		ret = gst_clock_id_wait (sink->priv->cached_clock_id, jitter);
+
+	GST_BASE_SINK_WAIT_CLOCK_END
 }
 
 /**
@@ -2569,7 +2955,11 @@ again:
 
   /* This function will return immediately if start == -1, no clock
    * or sync is disabled with GST_CLOCK_BADTIME. */
-  status = gst_base_sink_wait_clock (basesink, stime, &jitter);
+
+  if(priv->cc_enabled)
+    status = basesink_cc_wait_calibrated_clock(basesink, stime, &jitter);
+  else
+    status = gst_base_sink_wait_clock (basesink, stime, &jitter);
 
   GST_DEBUG_OBJECT (basesink, "clock returned %d, jitter %c%" GST_TIME_FORMAT,
       status, (jitter < 0 ? '-' : ' '), GST_TIME_ARGS (ABS (jitter)));
@@ -2922,7 +3312,19 @@ gst_base_sink_do_render_stats (GstBaseSink * basesink, gboolean start)
   priv = basesink->priv;
 
   if (start) {
-    priv->start = gst_util_get_timestamp ();
+
+    GstClockTime now = gst_util_get_timestamp ();
+
+    if(priv->CC.is_video_sink && GST_CLOCK_TIME_IS_VALID(priv->start)) {
+
+	int index = (GST_TIME_AS_MSECONDS(now - priv->start) % GST_MSECOND) / 10;
+	if(index >= 0 && index < 10) {
+		priv->CC.cc_stats[index]++;
+		GST_LOG("index(%d) , count(%d)", index, priv->CC.cc_stats[index]);
+	}
+    }
+
+    priv->start = now;
   } else {
     GstClockTime elapsed;
 
@@ -3525,6 +3927,66 @@ gst_base_sink_event (GstPad * pad, GstEvent * event)
 
       gst_event_unref (event);
       break;
+#ifdef _VSP_SPEED_
+	case GST_EVENT_CUSTOM_DOWNSTREAM:
+	{
+		GValue * value;
+		GstStructure *structure = event->structure;
+		if(gst_structure_has_name(structure,"vsp/enable")) {
+			value = gst_structure_get_value(structure,"enable");
+			gboolean enabled = g_value_get_boolean (value);
+
+			GST_OBJECT_LOCK(basesink);
+			basesink->priv->vsp_enabled = enabled;
+			GST_OBJECT_UNLOCK(basesink);
+
+			GST_DEBUG("vsp/enable:enabled=%d",enabled);
+
+			gst_event_unref (event);
+
+			break;
+		} else if(gst_structure_has_name(structure,"vsp/speed")) {
+			GstClock *clock = GST_ELEMENT_CLOCK (basesink);
+			value = gst_structure_get_value(structure,"speed");
+			gdouble speed = g_value_get_double (value);
+			value = gst_structure_get_value(structure,"position");
+			gint64 position = g_value_get_int64 (value);
+
+			GST_DEBUG("vsp/speed:speed=%2f,position=%lld",speed,position);
+
+			GST_OBJECT_LOCK(basesink);
+
+			/* update segment.stop as streaming time has been changed by audiovsp */
+			/* formula:	stop1 = rtime0 + (stop - stime1) / speed1
+			* 	 	stop2 = rtime0 + (stime2 - stime2) / speed1 + (stop - stime2) / speed2
+			*		......
+			*/
+
+#define UPDATE_SEGMENT(stop) \
+	if(GST_CLOCK_TIME_IS_VALID(stop)) { \
+		if(!GST_CLOCK_TIME_IS_VALID(basesink->priv->vsp_stop)) { \
+			basesink->priv->vsp_stop = stop; \
+		} \
+		stop = stop \
+			+ (basesink->priv->vsp_stop - position) \
+			* (1/speed - 1/basesink->priv->vsp_speed); \
+	}
+
+			UPDATE_SEGMENT(basesink->abidata.ABI.clip_segment->stop);
+			UPDATE_SEGMENT(basesink->segment.stop);
+
+			basesink->priv->vsp_speed = speed;
+			basesink->priv->vsp_position = position;
+			basesink->priv->vsp_last_rtime = clock ? gst_clock_get_time(clock) : 0;
+
+			GST_OBJECT_UNLOCK(basesink);
+
+			gst_event_unref (event);
+			break;
+		}
+		/* no break here,let it go down */
+	}
+#endif
     default:
       /* other events are sent to queue or subclass depending on if they
        * are serialized. */
@@ -3652,14 +4114,24 @@ gst_base_sink_chain_unlocked (GstBaseSink * basesink, GstPad * pad,
 
   /* check if the buffer needs to be dropped, we first ask the subclass for the
    * start and end */
-  if (bclass->get_times)
+  if (bclass->get_times) {
     bclass->get_times (basesink, time_buf, &start, &end);
+  }
 
   if (!GST_CLOCK_TIME_IS_VALID (start)) {
     /* if the subclass does not want sync, we use our own values so that we at
      * least clip the buffer to the segment */
     gst_base_sink_get_times (basesink, time_buf, &start, &end);
   }
+#ifdef _VSP_SPEED_
+  else {
+    basesink->priv->vsp_video = TRUE;
+    basesink_cc_is_video_sink(basesink,TRUE);
+  }
+#else
+  else
+    basesink_cc_is_video_sink(basesink,TRUE);
+#endif
 
   GST_DEBUG_OBJECT (basesink, "got times start: %" GST_TIME_FORMAT
       ", end: %" GST_TIME_FORMAT, GST_TIME_ARGS (start), GST_TIME_ARGS (end));
@@ -4466,6 +4938,68 @@ activate_failed:
   }
 }
 
+#ifdef _VSP_SPEED_
+static gboolean
+gst_base_sink_perform_custom_upstream(GstBaseSink *basesink, GstPad *pad, GstEvent *event)
+{
+	GValue * value;
+	GstStructure *structure = event->structure;
+	gboolean result = FALSE;
+
+	/* only handle in video case */
+	if(basesink->priv->vsp_video
+		&& gst_structure_has_name(structure,"application/speed")) {
+		value = gst_structure_get_value(structure,"enable");
+		basesink->priv->vsp_enabled = g_value_get_boolean (value);
+
+		result = TRUE;
+	}
+	return result;
+}
+
+static gboolean
+gst_base_sink_perform_speed(GstBaseSink *basesink, GstPad *pad, GstEvent **event)
+{
+	gboolean result = FALSE;
+	gdouble rate;
+	GstFormat format;
+	GstSeekFlags flags;
+	GstSeekType start_type, stop_type;
+	gint64 start, stop;
+
+	gst_event_parse_seek (*event, &rate, &format, &flags, &start_type, &start,
+		&stop_type, &stop);
+	/* only handle in video case */
+	if(basesink->priv->vsp_video
+		&& basesink->priv->vsp_enabled) {
+
+		if(basesink->priv->vsp_speed != rate) {
+
+			if(format != GST_FORMAT_TIME) {
+				result = FALSE;
+				goto done;
+			}
+
+			/* need to update segment.start && segment.rate */
+			basesink->priv->vsp_speed = rate;
+			gst_base_sink_event(pad,
+				gst_event_new_new_segment (TRUE, rate, format,
+				start, stop, start));
+			result = TRUE;
+		} else {
+			/* forward seek with rate = 1.0 */
+			gst_event_unref(*event);
+
+			*event = gst_event_new_seek(1.0,
+				format,flags,start_type,start,stop_type,stop);
+		}
+	}
+
+done:
+	return result;
+}
+#endif
+
 /* send an event to our sinkpad peer. */
 static gboolean
 gst_base_sink_send_event (GstElement * element, GstEvent * event)
@@ -4513,11 +5047,24 @@ gst_base_sink_send_event (GstElement * element, GstEvent * event)
       /* in pull mode we will execute the seek */
       if (mode == GST_ACTIVATE_PULL)
         result = gst_base_sink_perform_seek (basesink, pad, event);
+#ifdef _VSP_SPEED_
+      else {
+        result = gst_base_sink_perform_speed (basesink, pad, &event);
+	if(result)
+          forward = FALSE;
+      }
+#endif
       break;
     case GST_EVENT_STEP:
       result = gst_base_sink_perform_step (basesink, pad, event);
       forward = FALSE;
       break;
+#ifdef _VSP_SPEED_
+    case GST_EVENT_CUSTOM_UPSTREAM:
+      result = gst_base_sink_perform_custom_upstream (basesink, pad, event);
+      if(result)
+        forward = FALSE;
+#endif
     default:
       break;
   }
@@ -4679,6 +5226,13 @@ gst_base_sink_get_position (GstBaseSink * basesink, GstFormat format,
     GST_DEBUG_OBJECT (basesink, "using last seen timestamp %" GST_TIME_FORMAT,
         GST_TIME_ARGS (last));
     *cur = last;
+
+#ifdef _VSP_SPEED_
+	GST_OBJECT_LOCK(basesink);
+	if(basesink->priv->vsp_enabled && !basesink->priv->vsp_video)
+		*cur = basesink->priv->vsp_last_position;
+	GST_OBJECT_UNLOCK(basesink);
+#endif
   } else {
     if (oformat != tformat) {
       /* convert accum, time and duration to time */
@@ -4712,6 +5266,7 @@ gst_base_sink_get_position (GstBaseSink * basesink, GstFormat format,
      * rate and applied rate. */
     base += accum;
     base += latency;
+
     if (GST_CLOCK_DIFF (base, now) < 0)
       base = now;
 
@@ -4720,7 +5275,28 @@ gst_base_sink_get_position (GstBaseSink * basesink, GstFormat format,
     if (rate < 0.0)
       time += duration;
 
+#ifdef _VSP_SPEED_
+	GST_OBJECT_LOCK(basesink);
+	if(basesink->priv->vsp_enabled && !basesink->priv->vsp_video) {
+
+		/* always assign vsp_last_rtime a valid value */
+		if(basesink->priv->vsp_last_rtime <= 0)
+			basesink->priv->vsp_last_rtime = base;
+
+		*cur = basesink->priv->vsp_position
+			+ gst_guint64_to_gdouble (now - basesink->priv->vsp_last_rtime)
+			* basesink->priv->vsp_speed;
+		basesink->priv->vsp_last_position = *cur;
+		/* did trust segment when vsp enabled as set-speed op did not send newsegment now */
+		last = -1;
+	}
+	else
+#endif
     *cur = time + gst_guint64_to_gdouble (now - base) * rate;
+
+#ifdef _VSP_SPEED_
+	GST_OBJECT_UNLOCK(basesink);
+#endif
 
     if (in_paused) {
       /* never report less than segment values in paused */
@@ -4729,7 +5305,7 @@ gst_base_sink_get_position (GstBaseSink * basesink, GstFormat format,
     } else {
       /* never report more than last seen position in playing */
       if (last != -1)
-        *cur = MIN (last, *cur);
+      	*cur = MIN (last, *cur);
     }
 
     GST_DEBUG_OBJECT (basesink,
@@ -5033,6 +5609,10 @@ gst_base_sink_change_state (GstElement * element, GstStateChange transition)
         priv->have_latency = TRUE;
       }
       GST_PAD_PREROLL_UNLOCK (basesink->sinkpad);
+
+	/* initialize cc structure */
+	basesink_cc_initialize(basesink);
+
       break;
     case GST_STATE_CHANGE_PAUSED_TO_PLAYING:
       GST_PAD_PREROLL_LOCK (basesink->sinkpad);
@@ -5087,6 +5667,11 @@ gst_base_sink_change_state (GstElement * element, GstStateChange transition)
        * And it should be unmarked, since e.g. losing our position upon flush
        * does not really change state to PAUSED ... */
       g_atomic_int_set (&basesink->priv->to_playing, FALSE);
+#ifdef _VSP_SPEED_
+      if(GST_IS_SYSTEM_CLOCK(GST_ELEMENT_CLOCK(basesink))) {
+        priv->vsp_last_rtime = gst_clock_get_time(GST_ELEMENT_CLOCK(basesink));
+      }
+#endif
       break;
     case GST_STATE_CHANGE_PLAYING_TO_PAUSED:
       g_atomic_int_set (&basesink->priv->to_playing, FALSE);
@@ -5179,6 +5764,9 @@ gst_base_sink_change_state (GstElement * element, GstStateChange transition)
         GST_DEBUG_OBJECT (basesink, "PAUSED to READY, don't need_preroll");
       }
       GST_PAD_PREROLL_UNLOCK (basesink->sinkpad);
+
+	/* unitialize cc structure */
+	basesink_cc_uninitialize(basesink);
       break;
     case GST_STATE_CHANGE_READY_TO_NULL:
       if (bclass->stop) {
